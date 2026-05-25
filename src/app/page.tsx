@@ -4,15 +4,18 @@ import { useState } from "react";
 import { JsonInput } from "@/components/JsonInput";
 import { ValidationErrors } from "@/components/ValidationErrors";
 import { lightingExample } from "@/lib/exampleData";
+import { empExample } from "@/lib/empExampleData";
 import {
   formatZodIssues,
   lightingProtocolSchema,
   type ValidationIssue,
 } from "@/lib/lightingSchema";
+import { empProtocolSchema } from "@/lib/empSchema";
 import {
   generateLightingDocx,
   TemplateRenderError,
 } from "@/lib/generateLightingDocx";
+import { generateEmpDocx } from "@/lib/generateEmpDocx";
 
 type Status =
   | { kind: "idle" }
@@ -20,7 +23,15 @@ type Status =
   | { kind: "generating" }
   | { kind: "generated"; message: string };
 
+type DocumentType = "lighting" | "emp";
+
+const DOC_LABELS: Record<DocumentType, string> = {
+  lighting: "Освещенность",
+  emp: "ЭМП",
+};
+
 export default function Page() {
+  const [docType, setDocType] = useState<DocumentType>("lighting");
   const [json, setJson] = useState<string>("");
   const [issues, setIssues] = useState<ValidationIssue[]>([]);
   const [fatalErrors, setFatalErrors] = useState<string[]>([]);
@@ -32,8 +43,15 @@ export default function Page() {
     setStatus({ kind: "idle" });
   }
 
+  function selectDocType(next: DocumentType) {
+    setDocType(next);
+    setJson("");
+    resetMessages();
+  }
+
   function loadExample() {
-    setJson(JSON.stringify(lightingExample, null, 2));
+    const example = docType === "lighting" ? lightingExample : empExample;
+    setJson(JSON.stringify(example, null, 2));
     resetMessages();
   }
 
@@ -48,7 +66,9 @@ export default function Page() {
       ]);
       return null;
     }
-    const result = lightingProtocolSchema.safeParse(parsed);
+    const schema =
+      docType === "lighting" ? lightingProtocolSchema : empProtocolSchema;
+    const result = schema.safeParse(parsed);
     if (!result.success) {
       setIssues(formatZodIssues(result.error));
       return null;
@@ -68,7 +88,13 @@ export default function Page() {
     if (!data) return;
     setStatus({ kind: "generating" });
     try {
-      await generateLightingDocx(data as Parameters<typeof generateLightingDocx>[0]);
+      if (docType === "lighting") {
+        await generateLightingDocx(
+          data as Parameters<typeof generateLightingDocx>[0],
+        );
+      } else {
+        await generateEmpDocx(data as Parameters<typeof generateEmpDocx>[0]);
+      }
       setStatus({ kind: "generated", message: "DOCX сгенерирован" });
     } catch (err) {
       if (err instanceof TemplateRenderError) {
@@ -84,12 +110,32 @@ export default function Page() {
     <main className="mx-auto flex max-w-4xl flex-col gap-4 p-6">
       <header>
         <h1 className="text-2xl font-semibold">
-          Аттестация рабочих мест — Освещенность
+          Аттестация рабочих мест — {DOC_LABELS[docType]}
         </h1>
         <p className="mt-1 text-sm text-slate-600">
           Вставьте JSON, валидируйте и сгенерируйте DOCX-протокол измерений.
         </p>
       </header>
+
+      <div className="flex flex-wrap gap-2">
+        {(Object.keys(DOC_LABELS) as DocumentType[]).map((key) => {
+          const active = docType === key;
+          return (
+            <button
+              key={key}
+              type="button"
+              onClick={() => selectDocType(key)}
+              className={
+                active
+                  ? "rounded bg-slate-900 px-3 py-1.5 text-sm font-medium text-white"
+                  : "rounded border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-100"
+              }
+            >
+              {DOC_LABELS[key]}
+            </button>
+          );
+        })}
+      </div>
 
       <JsonInput value={json} onChange={setJson} />
 

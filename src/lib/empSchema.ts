@@ -1,0 +1,63 @@
+import { z } from "zod";
+
+const nonEmpty = z.string().min(1, "не должно быть пустым");
+
+const rangeSchema = z.object({
+  name: nonEmpty,
+  distance: nonEmpty,
+  height: nonEmpty,
+  time: nonEmpty,
+  electricMeasured: nonEmpty,
+  electricAllowed: nonEmpty,
+  magneticMeasured: nonEmpty,
+  magneticAllowed: nonEmpty,
+});
+
+const measurementSchema = z.object({
+  rowNumber: z.number().int().positive(),
+  pointNumber: nonEmpty,
+  place: nonEmpty,
+  range1: rangeSchema,
+  range2: rangeSchema,
+});
+
+const placeSchema = z.object({
+  number: z.number().int().positive(),
+  name: nonEmpty,
+});
+
+export const empProtocolSchema = z.object({
+  protocol: z.object({
+    number: nonEmpty,
+    year: nonEmpty,
+    day: nonEmpty,
+    month: nonEmpty,
+    dateYear: nonEmpty,
+  }),
+  customer: z.object({
+    name: nonEmpty,
+    address: nonEmpty,
+  }),
+  measurementDate: z.object({
+    day: nonEmpty,
+    month: nonEmpty,
+    year: nonEmpty,
+  }),
+  purpose: nonEmpty,
+  methodologyStandard: nonEmpty,
+  productStandard: nonEmpty,
+  representative: nonEmpty,
+  places: z.array(placeSchema).min(1, "должно быть хотя бы одно место"),
+  emp_measurements: z
+    .array(measurementSchema)
+    .min(1, "должно быть хотя бы одно измерение"),
+  performer: z.object({
+    fullName: nonEmpty,
+    position: nonEmpty,
+  }),
+  director: z.object({
+    fullName: nonEmpty,
+  }),
+});
+
+export type EmpProtocolParsed = z.infer<typeof empProtocolSchema>;
