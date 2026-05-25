@@ -16,6 +16,48 @@ export class TemplateRenderError extends Error {
   }
 }
 
+type Scope = Record<string, unknown> | null | undefined;
+
+interface ParserContext {
+  scopeList?: Scope[];
+}
+
+function dotParser(tag: string) {
+  return {
+    get(scope: Scope, context?: ParserContext) {
+      if (tag === ".") return scope;
+      const parts = tag.split(".");
+      const first = parts[0];
+      let cur: unknown;
+      const list = context?.scopeList;
+      if (list && list.length > 0) {
+        for (let i = list.length - 1; i >= 0; i--) {
+          const s = list[i];
+          if (s != null && Object.prototype.hasOwnProperty.call(s, first)) {
+            cur = (s as Record<string, unknown>)[first];
+            break;
+          }
+        }
+      }
+      if (cur === undefined && scope && Object.prototype.hasOwnProperty.call(scope, first)) {
+        cur = (scope as Record<string, unknown>)[first];
+      }
+      for (let i = 1; i < parts.length; i++) {
+        if (cur == null) return null;
+        cur = (cur as Record<string, unknown>)[parts[i]];
+      }
+      return cur;
+    },
+  };
+}
+
+function buildTemplateData(data: LightingProtocol): Record<string, unknown> {
+  const placesText = data.places
+    .map((p) => `${p.number}. ${p.name}`)
+    .join(", ");
+  return { ...data, placesText };
+}
+
 export async function generateLightingDocx(data: LightingProtocol): Promise<void> {
   const response = await fetch(TEMPLATE_URL);
   if (!response.ok) {
@@ -29,10 +71,11 @@ export async function generateLightingDocx(data: LightingProtocol): Promise<void
   const doc = new Docxtemplater(zip, {
     paragraphLoop: true,
     linebreaks: true,
+    parser: dotParser,
   });
 
   try {
-    doc.render(data as unknown as Record<string, unknown>);
+    doc.render(buildTemplateData(data));
   } catch (err) {
     const details = extractTemplateErrorDetails(err);
     throw new TemplateRenderError(
