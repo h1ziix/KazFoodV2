@@ -10,12 +10,6 @@ export interface LightingMeasurement {
   allowed: number;
 }
 
-export interface LightingGroup {
-  number: number;
-  name: string;
-  measurements: LightingMeasurement[];
-}
-
 export interface LightingPlace {
   number: number;
   name: string;
@@ -49,7 +43,7 @@ export interface LightingProtocol {
     p: string;
   };
   places: LightingPlace[];
-  groups: LightingGroup[];
+  lighting_measurements: LightingMeasurement[];
   performer: {
     fullName: string;
     position: string;

@@ -16,7 +16,9 @@ export class TemplateRenderError extends Error {
   }
 }
 
-export async function generateLightingDocx(data: LightingProtocol): Promise<void> {
+export async function generateLightingDocx(
+  data: LightingProtocol,
+): Promise<void> {
   const response = await fetch(TEMPLATE_URL);
   if (!response.ok) {
     throw new Error(
@@ -32,7 +34,7 @@ export async function generateLightingDocx(data: LightingProtocol): Promise<void
   });
 
   try {
-    doc.render(data as unknown as Record<string, unknown>);
+    doc.render(buildTemplateContext(data));
   } catch (err) {
     const details = extractTemplateErrorDetails(err);
     throw new TemplateRenderError(
@@ -50,13 +52,57 @@ export async function generateLightingDocx(data: LightingProtocol): Promise<void
   saveAs(blob, filename);
 }
 
+export function buildTemplateContext(
+  data: LightingProtocol,
+): Record<string, unknown> {
+  const placesList = data.places
+    .map((p) => `${p.number}. ${p.name}`)
+    .join(", ");
+
+  return {
+    ...flatten(data, [
+      "lighting_measurements",
+      "places",
+    ]),
+    placesList,
+    lighting_measurements: data.lighting_measurements,
+  };
+}
+
+function flatten(
+  value: unknown,
+  skipKeys: string[] = [],
+  prefix = "",
+  out: Record<string, unknown> = {},
+): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    if (prefix) out[prefix] = value;
+    return out;
+  }
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (!prefix && skipKeys.includes(k)) continue;
+    const nextKey = prefix ? `${prefix}.${k}` : k;
+    if (v !== null && typeof v === "object" && !Array.isArray(v)) {
+      flatten(v, skipKeys, nextKey, out);
+    } else {
+      out[nextKey] = v;
+    }
+  }
+  return out;
+}
+
 function extractTemplateErrorDetails(err: unknown): string[] {
   if (!err || typeof err !== "object") {
     return [String(err)];
   }
   const anyErr = err as {
     message?: string;
-    properties?: { errors?: Array<{ message?: string; properties?: { explanation?: string } }> };
+    properties?: {
+      errors?: Array<{
+        message?: string;
+        properties?: { explanation?: string };
+      }>;
+    };
   };
   const out: string[] = [];
   if (anyErr.message) out.push(anyErr.message);

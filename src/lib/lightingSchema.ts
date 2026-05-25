@@ -14,12 +14,6 @@ const measurementSchema = z.object({
   allowed: z.number(),
 });
 
-const groupSchema = z.object({
-  number: z.number().int().positive(),
-  name: nonEmpty,
-  measurements: z.array(measurementSchema).min(1, "должно быть хотя бы одно измерение"),
-});
-
 const placeSchema = z.object({
   number: z.number().int().positive(),
   name: nonEmpty,
@@ -53,7 +47,9 @@ export const lightingProtocolSchema = z.object({
     p: nonEmpty,
   }),
   places: z.array(placeSchema).min(1, "должно быть хотя бы одно место"),
-  groups: z.array(groupSchema).min(1, "должна быть хотя бы одна группа"),
+  lighting_measurements: z
+    .array(measurementSchema)
+    .min(1, "должно быть хотя бы одно измерение"),
   performer: z.object({
     fullName: nonEmpty,
     position: nonEmpty,
