@@ -13,6 +13,8 @@ import { meteoProtocolSchema } from "@/lib/meteoSchema";
 import { summaryProtocolSchema } from "@/lib/summarySchema";
 import { conclusionProtocolSchema } from "@/lib/conclusionSchema";
 import { codingProtocolSchema } from "@/lib/codingSchema";
+import { coverDocumentSchema } from "@/lib/coverSchema";
+import { introDocumentSchema } from "@/lib/introSchema";
 
 // Example data (untouched)
 import { lightingExample } from "@/lib/exampleData";
@@ -26,6 +28,8 @@ import { meteoExample } from "@/lib/meteoExampleData";
 import { summaryExample } from "@/lib/summaryExampleData";
 import { conclusionExample } from "@/lib/conclusionExampleData";
 import { codingExample } from "@/lib/codingExampleData";
+import { coverExample } from "@/lib/coverExampleData";
+import { introExample } from "@/lib/introExampleData";
 
 // Per-document context builders re-exported by the existing generate*Docx
 // thin wrappers.  This keeps every wrapper file as the SSoT for its own
@@ -41,6 +45,8 @@ import { buildTemplateContext as meteoCtx } from "@/lib/generateMeteoDocx";
 import { buildTemplateContext as summaryCtx } from "@/lib/generateSummaryProtocolDocx";
 import { buildTemplateContext as conclusionCtx } from "@/lib/generateConclusionDocx";
 import { buildTemplateContext as codingCtx } from "@/lib/generateCodingDocx";
+import { buildTemplateContext as coverCtx } from "@/lib/generateCoverDocx";
+import { buildTemplateContext as introCtx } from "@/lib/generateIntroDocx";
 
 // Concrete protocol types — used to keep each descriptor internally
 // type-safe even though the public registry array is heterogeneous.
@@ -55,6 +61,8 @@ import type { MeteoProtocol } from "@/types/meteo";
 import type { SummaryProtocol } from "@/types/summary";
 import type { ConclusionProtocol } from "@/types/conclusion";
 import type { CodingProtocol } from "@/types/coding";
+import type { CoverDocument } from "@/types/cover";
+import type { IntroDocument } from "@/types/intro";
 
 /**
  * Declarative descriptor for a single DOCX document type.
@@ -113,6 +121,26 @@ function describe<T>(d: DocumentDescriptor<T>): DocumentDescriptor<unknown> {
  * here matches the UI tab order.
  */
 export const DOCUMENT_REGISTRY: DocumentDescriptor<unknown>[] = [
+  describe<CoverDocument>({
+    key: "cover",
+    label: "Обложка",
+    templateUrl: "/templates/cover-protocol.docx",
+    schema: coverDocumentSchema as unknown as z.ZodType<CoverDocument>,
+    example: coverExample,
+    buildContext: coverCtx,
+    filename: (d) =>
+      `Обложка_${d.customer.organization.replace(/[«»"\\/]+/g, "").trim()}.docx`,
+  }),
+  describe<IntroDocument>({
+    key: "intro",
+    label: "Введение",
+    templateUrl: "/templates/intro-protocol.docx",
+    schema: introDocumentSchema as unknown as z.ZodType<IntroDocument>,
+    example: introExample,
+    buildContext: introCtx,
+    filename: (d) =>
+      `Введение_${d.customer.name.replace(/[«»"\\/]+/g, "").trim()}.docx`,
+  }),
   describe<LightingProtocol>({
     key: "lighting",
     label: "Освещенность",
