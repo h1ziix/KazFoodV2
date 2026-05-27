@@ -1,68 +1,35 @@
-import Docxtemplater from "docxtemplater";
-import PizZip from "pizzip";
-import { saveAs } from "file-saver";
 import type {
   SafetyProtocol,
   SafetyRow,
-  SafetySection,
 } from "@/types/safety";
+import {
+  renderBlob,
+  renderDocument,
+  TemplateRenderError,
+} from "./docs/engine";
+import { flatten } from "./docs/flatten";
+import { flattenSectionsRows } from "./docs/rows";
 
 const TEMPLATE_URL = "/templates/safety-protocol.docx";
-const MIME_DOCX =
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
-export class TemplateRenderError extends Error {
-  public readonly details: string[];
-  constructor(message: string, details: string[]) {
-    super(message);
-    this.name = "TemplateRenderError";
-    this.details = details;
-  }
-}
+export { TemplateRenderError };
 
 export async function generateSafetyDocx(
   data: SafetyProtocol,
 ): Promise<void> {
-  const buffer = await fetchTemplate();
-  const blob = renderSafetyBlob(buffer, data);
-  const filename = `Травмобезопасность_${data.protocol.number}.docx`;
-  saveAs(blob, filename);
-}
-
-async function fetchTemplate(): Promise<ArrayBuffer> {
-  const response = await fetch(TEMPLATE_URL);
-  if (!response.ok) {
-    throw new Error(
-      `Не удалось загрузить шаблон ${TEMPLATE_URL}: ${response.status} ${response.statusText}`,
-    );
-  }
-  return response.arrayBuffer();
+  await renderDocument({
+    templateUrl: TEMPLATE_URL,
+    data,
+    buildContext: buildTemplateContext,
+    filename: (d) => `Травмобезопасность_${d.protocol.number}.docx`,
+  });
 }
 
 export function renderSafetyBlob(
   templateBuffer: ArrayBuffer | Buffer,
   data: SafetyProtocol,
 ): Blob {
-  const zip = new PizZip(templateBuffer as ArrayBuffer);
-  const doc = new Docxtemplater(zip, {
-    paragraphLoop: true,
-    linebreaks: true,
-  });
-
-  try {
-    doc.render(buildTemplateContext(data));
-  } catch (err) {
-    const details = extractTemplateErrorDetails(err);
-    throw new TemplateRenderError(
-      "Ошибка при рендеринге шаблона DOCX",
-      details,
-    );
-  }
-
-  return doc.getZip().generate({
-    type: "blob",
-    mimeType: MIME_DOCX,
-  });
+  return renderBlob(templateBuffer, buildTemplateContext(data));
 }
 
 export function buildTemplateContext(
@@ -81,24 +48,7 @@ export function buildTemplateContext(
 
   return {
     ...rootFlat,
-    sections: data.sections.map((s) => mapSection(s, rootFlat)),
-  };
-}
-
-function mapSection(
-  section: SafetySection,
-  rootFlat: Record<string, unknown>,
-): Record<string, unknown> {
-  return {
-    ...rootFlat,
-    section_number: section.number,
-    section_title: section.title,
-    rows: section.rows.map((r) => ({
-      ...rootFlat,
-      section_number: section.number,
-      section_title: section.title,
-      ...mapRow(r),
-    })),
+    sections: flattenSectionsRows(data.sections, mapRow, rootFlat),
   };
 }
 
@@ -113,47 +63,4 @@ function mapRow(r: SafetyRow): Record<string, unknown> {
     nonComplianceReasons: r.nonComplianceReasons,
     finalNote: r.finalNote,
   };
-}
-
-function flatten(
-  value: unknown,
-  prefix = "",
-  out: Record<string, unknown> = {},
-): Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    if (prefix) out[prefix] = value;
-    return out;
-  }
-  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-    const nextKey = prefix ? `${prefix}.${k}` : k;
-    if (v !== null && typeof v === "object" && !Array.isArray(v)) {
-      flatten(v, nextKey, out);
-    } else {
-      out[nextKey] = v;
-    }
-  }
-  return out;
-}
-
-function extractTemplateErrorDetails(err: unknown): string[] {
-  if (!err || typeof err !== "object") {
-    return [String(err)];
-  }
-  const anyErr = err as {
-    message?: string;
-    properties?: {
-      errors?: Array<{
-        message?: string;
-        properties?: { explanation?: string };
-      }>;
-    };
-  };
-  const out: string[] = [];
-  if (anyErr.message) out.push(anyErr.message);
-  const inner = anyErr.properties?.errors ?? [];
-  for (const e of inner) {
-    if (e.properties?.explanation) out.push(e.properties.explanation);
-    else if (e.message) out.push(e.message);
-  }
-  return out.length > 0 ? out : ["Неизвестная ошибка шаблонизатора"];
 }

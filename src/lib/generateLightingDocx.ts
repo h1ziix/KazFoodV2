@@ -1,55 +1,24 @@
-import Docxtemplater from "docxtemplater";
-import PizZip from "pizzip";
-import { saveAs } from "file-saver";
 import type { LightingProtocol } from "@/types/lighting";
+import { renderDocument, TemplateRenderError } from "./docs/engine";
+import { flatten } from "./docs/flatten";
 
 const TEMPLATE_URL = "/templates/lighting-protocol.docx";
-const MIME_DOCX =
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
-export class TemplateRenderError extends Error {
-  public readonly details: string[];
-  constructor(message: string, details: string[]) {
-    super(message);
-    this.name = "TemplateRenderError";
-    this.details = details;
-  }
-}
+// Re-export so existing `import { TemplateRenderError } from
+// "@/lib/generateLightingDocx"` continues to work (page.tsx still
+// references it).  The class itself is now defined once in
+// src/lib/docs/engine.ts.
+export { TemplateRenderError };
 
 export async function generateLightingDocx(
   data: LightingProtocol,
 ): Promise<void> {
-  const response = await fetch(TEMPLATE_URL);
-  if (!response.ok) {
-    throw new Error(
-      `Не удалось загрузить шаблон ${TEMPLATE_URL}: ${response.status} ${response.statusText}`,
-    );
-  }
-  const buffer = await response.arrayBuffer();
-
-  const zip = new PizZip(buffer);
-  const doc = new Docxtemplater(zip, {
-    paragraphLoop: true,
-    linebreaks: true,
+  await renderDocument({
+    templateUrl: TEMPLATE_URL,
+    data,
+    buildContext: buildTemplateContext,
+    filename: (d) => `Освещенность_${d.protocol.number}.docx`,
   });
-
-  try {
-    doc.render(buildTemplateContext(data));
-  } catch (err) {
-    const details = extractTemplateErrorDetails(err);
-    throw new TemplateRenderError(
-      "Ошибка при рендеринге шаблона DOCX",
-      details,
-    );
-  }
-
-  const blob = doc.getZip().generate({
-    type: "blob",
-    mimeType: MIME_DOCX,
-  });
-
-  const filename = `Освещенность_${data.protocol.number}.docx`;
-  saveAs(blob, filename);
 }
 
 export function buildTemplateContext(
@@ -60,56 +29,8 @@ export function buildTemplateContext(
     .join(", ");
 
   return {
-    ...flatten(data, [
-      "lighting_measurements",
-      "places",
-    ]),
+    ...flatten(data, { skipKeys: ["lighting_measurements", "places"] }),
     placesList,
     lighting_measurements: data.lighting_measurements,
   };
-}
-
-function flatten(
-  value: unknown,
-  skipKeys: string[] = [],
-  prefix = "",
-  out: Record<string, unknown> = {},
-): Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    if (prefix) out[prefix] = value;
-    return out;
-  }
-  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-    if (!prefix && skipKeys.includes(k)) continue;
-    const nextKey = prefix ? `${prefix}.${k}` : k;
-    if (v !== null && typeof v === "object" && !Array.isArray(v)) {
-      flatten(v, skipKeys, nextKey, out);
-    } else {
-      out[nextKey] = v;
-    }
-  }
-  return out;
-}
-
-function extractTemplateErrorDetails(err: unknown): string[] {
-  if (!err || typeof err !== "object") {
-    return [String(err)];
-  }
-  const anyErr = err as {
-    message?: string;
-    properties?: {
-      errors?: Array<{
-        message?: string;
-        properties?: { explanation?: string };
-      }>;
-    };
-  };
-  const out: string[] = [];
-  if (anyErr.message) out.push(anyErr.message);
-  const inner = anyErr.properties?.errors ?? [];
-  for (const e of inner) {
-    if (e.properties?.explanation) out.push(e.properties.explanation);
-    else if (e.message) out.push(e.message);
-  }
-  return out.length > 0 ? out : ["Неизвестная ошибка шаблонизатора"];
 }

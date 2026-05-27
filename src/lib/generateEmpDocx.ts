@@ -1,53 +1,18 @@
-import Docxtemplater from "docxtemplater";
-import PizZip from "pizzip";
-import { saveAs } from "file-saver";
 import type { EmpMeasurement, EmpProtocol } from "@/types/emp";
+import { renderDocument, TemplateRenderError } from "./docs/engine";
+import { flatten } from "./docs/flatten";
 
 const TEMPLATE_URL = "/templates/emp-protocol.docx";
-const MIME_DOCX =
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
-export class TemplateRenderError extends Error {
-  public readonly details: string[];
-  constructor(message: string, details: string[]) {
-    super(message);
-    this.name = "TemplateRenderError";
-    this.details = details;
-  }
-}
+export { TemplateRenderError };
 
 export async function generateEmpDocx(data: EmpProtocol): Promise<void> {
-  const response = await fetch(TEMPLATE_URL);
-  if (!response.ok) {
-    throw new Error(
-      `Не удалось загрузить шаблон ${TEMPLATE_URL}: ${response.status} ${response.statusText}`,
-    );
-  }
-  const buffer = await response.arrayBuffer();
-
-  const zip = new PizZip(buffer);
-  const doc = new Docxtemplater(zip, {
-    paragraphLoop: true,
-    linebreaks: true,
+  await renderDocument({
+    templateUrl: TEMPLATE_URL,
+    data,
+    buildContext: buildTemplateContext,
+    filename: (d) => `ЭМП_${d.protocol.number}.docx`,
   });
-
-  try {
-    doc.render(buildTemplateContext(data));
-  } catch (err) {
-    const details = extractTemplateErrorDetails(err);
-    throw new TemplateRenderError(
-      "Ошибка при рендеринге шаблона DOCX",
-      details,
-    );
-  }
-
-  const blob = doc.getZip().generate({
-    type: "blob",
-    mimeType: MIME_DOCX,
-  });
-
-  const filename = `ЭМП_${data.protocol.number}.docx`;
-  saveAs(blob, filename);
 }
 
 export function buildTemplateContext(
@@ -56,7 +21,7 @@ export function buildTemplateContext(
   const placesList = data.places.map((p) => `${p.number}. ${p.name}`).join(", ");
 
   return {
-    ...flatten(data, ["emp_measurements", "places"]),
+    ...flatten(data, { skipKeys: ["emp_measurements", "places"] }),
     placesList,
     emp_measurements: data.emp_measurements.map(flattenMeasurement),
   };
@@ -86,49 +51,4 @@ function flattenMeasurement(
     range2MagneticMeasured: measurement.range2.magneticMeasured,
     range2MagneticAllowed: measurement.range2.magneticAllowed,
   };
-}
-
-function flatten(
-  value: unknown,
-  skipKeys: string[] = [],
-  prefix = "",
-  out: Record<string, unknown> = {},
-): Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    if (prefix) out[prefix] = value;
-    return out;
-  }
-  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-    if (!prefix && skipKeys.includes(k)) continue;
-    const nextKey = prefix ? `${prefix}.${k}` : k;
-    if (v !== null && typeof v === "object" && !Array.isArray(v)) {
-      flatten(v, skipKeys, nextKey, out);
-    } else {
-      out[nextKey] = v;
-    }
-  }
-  return out;
-}
-
-function extractTemplateErrorDetails(err: unknown): string[] {
-  if (!err || typeof err !== "object") {
-    return [String(err)];
-  }
-  const anyErr = err as {
-    message?: string;
-    properties?: {
-      errors?: Array<{
-        message?: string;
-        properties?: { explanation?: string };
-      }>;
-    };
-  };
-  const out: string[] = [];
-  if (anyErr.message) out.push(anyErr.message);
-  const inner = anyErr.properties?.errors ?? [];
-  for (const e of inner) {
-    if (e.properties?.explanation) out.push(e.properties.explanation);
-    else if (e.message) out.push(e.message);
-  }
-  return out.length > 0 ? out : ["Неизвестная ошибка шаблонизатора"];
 }
