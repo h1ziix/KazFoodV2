@@ -1,12 +1,25 @@
 /**
- * Сборка DOCX-шаблона для протокола №13 «Оценка обеспеченности СИЗ».
+ * Builds public/templates/siz-protocol.docx from the ORIGINAL reference
+ * "13. СИЗ каз-рус ГОТОВо kazfood.docx" via surgical XML edits on the
+ * existing word/document.xml.
  *
- * Использует public/templates/lighting-protocol.docx как базу (styles/theme/
- * settings/numbering и т. п.), целиком заменяет word/document.xml на
- * собственный с docxtemplater-плейсхолдерами и вложенными циклами
- * {#sections}{#rows}…{/rows}{/sections}.
+ * Strategy mirrors scripts/build-safety-template.mjs:
+ *   - The ORIGINAL DOCX is the structural source-of-truth.
+ *   - We do NOT rebuild document.xml. We only:
+ *       * replace inner text of existing <w:t> nodes with placeholders;
+ *       * collapse the MERGEFIELD «дата проведения» run group into a
+ *         single placeholder run, preserving its <w:rPr>;
+ *       * replace each data row's cell paragraphs with a single
+ *         placeholder run (keeping the cell's <w:tcPr> intact);
+ *       * wrap the admin row block with {#adminRows}..{/adminRows} and
+ *         the production row block with {#productionRows}..{/productionRows}.
+ *   - The page setup, header1.xml ("Приложение № 5 к Приказу МЗ РК 1057
+ *     от 28.12.2015г."), styles, numbering, fonts, table geometry,
+ *     paragraph properties, run formatting, borders, widths, merged
+ *     cells, footer/signature layout and all spacing are preserved
+ *     exactly because the entire docx package is reused.
  *
- * Запуск: node scripts/build-siz-template.js
+ * Run: node scripts/build-siz-template.js
  */
 
 const fs = require("fs");
@@ -14,11 +27,9 @@ const path = require("path");
 const PizZip = require("pizzip");
 
 const ROOT = path.resolve(__dirname, "..");
-const BASE_TEMPLATE = path.join(
+const ORIGINAL = path.join(
   ROOT,
-  "public",
-  "templates",
-  "lighting-protocol.docx",
+  "13. \u0421\u0418\u0417 \u043a\u0430\u0437-\u0440\u0443\u0441 \u0413\u041e\u0422\u041e\u0412\u043e kazfood.docx",
 );
 const OUT_TEMPLATE = path.join(
   ROOT,
@@ -27,361 +38,461 @@ const OUT_TEMPLATE = path.join(
   "siz-protocol.docx",
 );
 
-// -------- XML helpers --------
+// ---------- generic XML helpers ----------
 
-function xmlEscape(s) {
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+function findElementEnd(xml, tag, openIdx) {
+  const openRe = new RegExp(`<${tag}(?:\\s|>|/>)`, "g");
+  const closeTag = `</${tag}>`;
+  openRe.lastIndex = openIdx + 1;
+  let depth = 1;
+  while (depth > 0) {
+    const closeIdx = xml.indexOf(closeTag, openRe.lastIndex - 1);
+    if (closeIdx === -1) throw new Error(`Unbalanced <${tag}> from ${openIdx}`);
+    openRe.lastIndex = openIdx + 1;
+    let nextOpen = -1;
+    while (true) {
+      const m = openRe.exec(xml);
+      if (!m) break;
+      if (m.index > closeIdx) break;
+      if (
+        xml[m.index + m[0].length - 1] === ">" &&
+        xml[m.index + m[0].length - 2] === "/"
+      )
+        continue;
+      nextOpen = m.index;
+    }
+    if (nextOpen !== -1 && nextOpen < closeIdx) {
+      depth += 1;
+      openRe.lastIndex = nextOpen + 1;
+    } else {
+      depth -= 1;
+      if (depth === 0) return closeIdx + closeTag.length;
+      openRe.lastIndex = closeIdx + closeTag.length;
+    }
+  }
+  throw new Error(`Could not find end of <${tag}>`);
 }
 
-function p(text, opts = {}) {
-  const {
-    bold = false,
-    italic = false,
-    size = 22,
-    align = "left",
-    before = 0,
-    after = 0,
-  } = opts;
-  const rPr = `<w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/>${
-    bold ? "<w:b/>" : ""
-  }${italic ? "<w:i/>" : ""}<w:sz w:val="${size}"/><w:szCs w:val="${size}"/><w:lang w:val="ru-RU"/></w:rPr>`;
-  const pPr = `<w:pPr><w:spacing w:before="${before}" w:after="${after}" w:line="240" w:lineRule="auto"/><w:jc w:val="${align}"/></w:pPr>`;
-  return `<w:p>${pPr}<w:r>${rPr}<w:t xml:space="preserve">${xmlEscape(text)}</w:t></w:r></w:p>`;
+/**
+ * Replace the text inside an EXACT <w:t>oldText</w:t> match.
+ * The match must be unique inside `xml`; otherwise throws (caller
+ * should pick a more specific anchor).
+ */
+function replaceWtExact(xml, oldText, newText) {
+  const esc = oldText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`<w:t(\\s[^>]*)?>${esc}</w:t>`, "g");
+  const matches = [...xml.matchAll(re)];
+  if (matches.length === 0)
+    throw new Error(
+      `replaceWtExact: no match for ${JSON.stringify(oldText.slice(0, 80))}`,
+    );
+  if (matches.length > 1)
+    throw new Error(
+      `replaceWtExact: ${matches.length} matches for ${JSON.stringify(
+        oldText.slice(0, 60),
+      )}`,
+    );
+  const m = matches[0];
+  const attrs = m[1] ?? ' xml:space="preserve"';
+  return xml.replace(m[0], `<w:t${attrs}>${newText}</w:t>`);
 }
 
-function cellP(text, opts = {}) {
-  const {
-    bold = false,
-    italic = false,
-    size = 18,
-    align = "center",
-  } = opts;
-  const rPr = `<w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/>${
-    bold ? "<w:b/>" : ""
-  }${italic ? "<w:i/>" : ""}<w:sz w:val="${size}"/><w:szCs w:val="${size}"/><w:lang w:val="ru-RU"/></w:rPr>`;
-  const pPr = `<w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/><w:jc w:val="${align}"/></w:pPr>`;
-  return `<w:p>${pPr}<w:r>${rPr}<w:t xml:space="preserve">${xmlEscape(text)}</w:t></w:r></w:p>`;
+/**
+ * Locate a <w:tr> by an anchor string contained somewhere inside it.
+ * Returns { start, end } byte offsets.
+ */
+function locateRowByAnchor(xml, anchor, fromIdx = 0) {
+  const ai = xml.indexOf(anchor, fromIdx);
+  if (ai === -1) throw new Error(`Anchor not found: ${anchor.slice(0, 80)}`);
+  const start = xml.lastIndexOf("<w:tr ", ai);
+  if (start === -1) throw new Error("<w:tr> before anchor not found");
+  const end = findElementEnd(xml, "w:tr", start);
+  return { start, end };
 }
 
-function cellRaw(text) {
-  const rPr = `<w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/><w:sz w:val="2"/></w:rPr>`;
-  const pPr = `<w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>`;
-  return `<w:p>${pPr}<w:r>${rPr}<w:t xml:space="preserve">${xmlEscape(text)}</w:t></w:r></w:p>`;
+/**
+ * Inside one <w:tc>...</w:tc> XML chunk, REPLACE all paragraphs with a
+ * single <w:p> that reuses the FIRST paragraph's <w:pPr> and the FIRST
+ * run's <w:rPr>, containing a single <w:t> with `placeholder`.
+ *
+ * If placeholder === null, leaves a single empty paragraph (used when a
+ * cell should render as empty during loop iteration but exists in the
+ * row template).
+ *
+ * Critically: <w:tcPr> (width, gridSpan, vMerge, borders, vAlign,
+ * shading) is left untouched.
+ */
+function rewriteCellText(cellXml, placeholder) {
+  // Locate <w:tcPr>...</w:tcPr> end (everything before the FIRST <w:p>)
+  const pStart1 = cellXml.indexOf("<w:p ");
+  const pStart2 = cellXml.indexOf("<w:p>");
+  const firstP =
+    pStart1 !== -1 && (pStart2 === -1 || pStart1 < pStart2) ? pStart1 : pStart2;
+  if (firstP === -1) return cellXml; // nothing to do
+  const header = cellXml.slice(0, firstP);
+  const tcClose = cellXml.lastIndexOf("</w:tc>");
+  const tail = cellXml.slice(tcClose);
+
+  // First <w:p ...> tag opening (we keep its attributes if any)
+  const pTagEnd = cellXml.indexOf(">", firstP) + 1;
+  const pOpen = cellXml.slice(firstP, pTagEnd);
+
+  // Capture the first <w:pPr>...</w:pPr> if present inside the first <w:p>
+  let pPr = "";
+  const pPrStart = cellXml.indexOf("<w:pPr>", firstP);
+  if (pPrStart !== -1) {
+    const firstPClose = cellXml.indexOf("</w:p>", firstP);
+    if (pPrStart < firstPClose) {
+      const pPrEnd = findElementEnd(cellXml, "w:pPr", pPrStart);
+      pPr = cellXml.slice(pPrStart, pPrEnd);
+    }
+  }
+
+  // Capture the first <w:rPr>...</w:rPr> from the first non-pPr run
+  let rPr = "";
+  const firstR1 = cellXml.indexOf("<w:r ", firstP);
+  const firstR2 = cellXml.indexOf("<w:r>", firstP);
+  const rIdx =
+    firstR1 !== -1 && (firstR2 === -1 || firstR1 < firstR2) ? firstR1 : firstR2;
+  if (rIdx !== -1 && rIdx < tcClose) {
+    const rEnd = findElementEnd(cellXml, "w:r", rIdx);
+    const rPrStart = cellXml.indexOf("<w:rPr>", rIdx);
+    if (rPrStart !== -1 && rPrStart < rEnd) {
+      const rPrEnd = findElementEnd(cellXml, "w:rPr", rPrStart);
+      rPr = cellXml.slice(rPrStart, rPrEnd);
+    }
+  }
+
+  const body =
+    placeholder === null
+      ? `${pOpen}${pPr}</w:p>`
+      : `${pOpen}${pPr}<w:r>${rPr}<w:t xml:space="preserve">${placeholder}</w:t></w:r></w:p>`;
+  return `${header}${body}${tail}`;
 }
 
-function tc(content, opts = {}) {
-  const { width = 1000, gridSpan = 1, vMerge, shd } = opts;
-  const tcW = `<w:tcW w:w="${width}" w:type="dxa"/>`;
-  const span = gridSpan > 1 ? `<w:gridSpan w:val="${gridSpan}"/>` : "";
-  const merge = vMerge
-    ? `<w:vMerge${vMerge === "restart" ? ' w:val="restart"' : ""}/>`
-    : "";
-  const shading = shd
-    ? `<w:shd w:val="clear" w:color="auto" w:fill="${shd}"/>`
-    : "";
-  const borders = `<w:tcBorders><w:top w:val="single" w:sz="4" w:color="auto"/><w:left w:val="single" w:sz="4" w:color="auto"/><w:bottom w:val="single" w:sz="4" w:color="auto"/><w:right w:val="single" w:sz="4" w:color="auto"/></w:tcBorders>`;
-  const tcPr = `<w:tcPr>${tcW}${span}${merge}${borders}${shading}<w:vAlign w:val="center"/></w:tcPr>`;
-  return `<w:tc>${tcPr}${content}</w:tc>`;
+/**
+ * Replace every <w:tc> body in a row with the corresponding placeholder
+ * (or null to leave empty). `placeholders.length` must equal the number
+ * of <w:tc> cells in the row.
+ */
+function templatizeRow(rowXml, placeholders) {
+  const cells = [];
+  let idx = 0;
+  while (true) {
+    const open = rowXml.indexOf("<w:tc>", idx);
+    if (open === -1) break;
+    const end = findElementEnd(rowXml, "w:tc", open);
+    cells.push({ start: open, end });
+    idx = end;
+  }
+  if (cells.length !== placeholders.length)
+    throw new Error(
+      `templatizeRow: expected ${placeholders.length} cells, got ${cells.length}`,
+    );
+  let out = rowXml.slice(0, cells[0].start);
+  for (let i = 0; i < cells.length; i++) {
+    const c = cells[i];
+    const cellXml = rowXml.slice(c.start, c.end);
+    out += rewriteCellText(cellXml, placeholders[i]);
+  }
+  out += rowXml.slice(cells[cells.length - 1].end);
+  return out;
 }
 
-function tr(...cells) {
-  return `<w:tr>${cells.join("")}</w:tr>`;
+/**
+ * Inject `{#tag}` right after the FIRST <w:t> opening and `{/tag}` just
+ * before the LAST </w:t> closing inside `blockXml`. This is the trick
+ * used by build-safety-template.mjs to wrap a multi-row block in a
+ * docxtemplater loop without splitting any paragraph or run.
+ */
+function wrapBlockWithLoop(blockXml, openTag, closeTag) {
+  const tRe = /<w:t(?:\s[^>]*)?>/g;
+  const m = tRe.exec(blockXml);
+  if (!m) throw new Error("wrapBlockWithLoop: no <w:t> in block");
+  const firstStart = m.index + m[0].length;
+  let out =
+    blockXml.slice(0, firstStart) + openTag + blockXml.slice(firstStart);
+  const lastClose = out.lastIndexOf("</w:t>");
+  out = out.slice(0, lastClose) + closeTag + out.slice(lastClose);
+  return out;
 }
 
-// -------- Header --------
+// ---------- main ----------
 
-function labHeader() {
-  return [
-    p("«Центр экспертной оценки условий труда» ЖШС", {
-      bold: true,
-      align: "center",
-      size: 22,
-    }),
-    p("Сынақ зертханасы", { bold: true, align: "center", size: 22 }),
-    p("Алматы қ., Турксиб ауданы, Остроумов көш., 50А үй", {
-      align: "center",
-      size: 20,
-    }),
-    p("Телефон/факс: +7 777 231 70 74, +7 700 992 05 59", {
-      align: "center",
-      size: 20,
-    }),
-    p("Е-mail: info@hse-profi.kz", { bold: true, align: "center", size: 20 }),
-    p("KZ.T.02.E1210 Аккредиттеу аттестаты", {
-      bold: true,
-      align: "center",
-      size: 20,
-    }),
-    p("2022 ж. 25 шілде 2022 ж.", { bold: true, align: "center", size: 20 }),
-    p("25 шілде 2027 дейін", { bold: true, align: "center", size: 20 }),
-  ].join("");
-}
+function main() {
+  if (!fs.existsSync(ORIGINAL))
+    throw new Error(`Original СИЗ DOCX not found: ${ORIGINAL}`);
 
-function protocolTitle() {
-  return [
-    p("№{protocol.number} ХАТТАМАСЫ", {
-      bold: true,
-      align: "center",
-      size: 24,
-      before: 200,
-    }),
-    p("ПРОТОКОЛ №{protocol.number}", {
-      bold: true,
-      align: "center",
-      size: 26,
-    }),
-    p("қызметкерлердің жеке қорғану құралдарымен қамтамасыздандырылуын бағалау", {
-      bold: true,
-      italic: true,
-      align: "center",
-      size: 22,
-    }),
-    p(
-      "оценки обеспеченности работника специальной одеждой, специальной обувью и средствами индивидуальной защиты",
-      { bold: true, align: "center", size: 22 },
-    ),
-  ].join("");
-}
+  const zip = new PizZip(fs.readFileSync(ORIGINAL));
+  const docFile = zip.file("word/document.xml");
+  if (!docFile) throw new Error("word/document.xml missing in original");
+  let xml = docFile.asText();
 
-function customerBlock() {
-  return [
-    p(
-      "Тапсырыс берушінің атауы және мекен-жайы (наименование и адрес заказчика): {customer.name}, {customer.address}",
-      { bold: true, size: 22, before: 120 },
-    ),
-    p(
-      "Өлшеу жүргізу орны (место проведения оценки): {measurementPlace}",
-      { bold: true, size: 22 },
-    ),
-    p(
-      "Өлшем жүргізу күні (дата проведения оценки): «{measurementDate.day}» {measurementDate.month} {measurementDate.year} г.",
-      { bold: true, size: 22 },
-    ),
-    p(
-      "ЖҚҚ-мен қамсыздандырылуды бағалау (результаты оценки обеспеченности средствами индивидуальной защиты):",
-      { bold: true, size: 22, after: 120 },
-    ),
-  ].join("");
-}
+  // A) Top-level placeholders OUTSIDE the data row block
+  xml = injectTopLevelPlaceholders(xml);
 
-// -------- Main table --------
+  // B) Templatize the data rows of the main table (admin + production)
+  xml = templatizeMainTable(xml);
 
-const COLS = {
-  code: 1100,
-  position: 1800,
-  count: 600,
-  norm: 3500,
-  issued: 900,
-  cert: 1200,
-  assess: 1300,
-  note: 800,
-};
-const COL_ORDER = [
-  COLS.code,
-  COLS.position,
-  COLS.count,
-  COLS.norm,
-  COLS.issued,
-  COLS.cert,
-  COLS.assess,
-  COLS.note,
-];
-const TOTAL_WIDTH = COL_ORDER.reduce((a, b) => a + b, 0);
-
-// Two-row header: row 1 has merged "Перечень СИЗ" cell spanning issued+cert+norm,
-// but проще — два уровня заголовков с vMerge для одиночных колонок и
-// gridSpan=3 для группы "СИЗ".
-function tableHeader() {
-  // Row 1
-  const row1 = tr(
-    tc(
-      cellP(
-        "Жұмыс орнының коды (код рабочего места)",
-        { bold: true, size: 13 },
-      ),
-      { width: COLS.code, vMerge: "restart", shd: "DDEBF7" },
-    ),
-    tc(
-      cellP(
-        "Кәсіптер мен лауазымдардың атауы (наименование профессий, должностей)",
-        { bold: true, size: 13 },
-      ),
-      { width: COLS.position, vMerge: "restart", shd: "DDEBF7" },
-    ),
-    tc(
-      cellP(
-        "Жұмыс орнының саны (кол-во рабочих мест)",
-        { bold: true, size: 13 },
-      ),
-      { width: COLS.count, vMerge: "restart", shd: "DDEBF7" },
-    ),
-    tc(
-      cellP(
-        "Қызметкерге берілуге тиіс ЖҚҚ тізілімі (перечень СИЗ, которые должны быть выданы работнику)",
-        { bold: true, size: 13 },
-      ),
-      {
-        width: COLS.norm + COLS.issued + COLS.cert,
-        gridSpan: 3,
-        shd: "DDEBF7",
-      },
-    ),
-    tc(
-      cellP(
-        "ЖҚҚ-мен қамсыздандырылуды бағалау (оценка обеспеченности СИЗ: обеспечен / необеспечен)",
-        { bold: true, size: 13 },
-      ),
-      { width: COLS.assess, vMerge: "restart", shd: "DDEBF7" },
-    ),
-    tc(
-      cellP("Ескерту (примечание)", { bold: true, size: 13 }),
-      { width: COLS.note, vMerge: "restart", shd: "DDEBF7" },
-    ),
-  );
-  // Row 2 — подколонки группы "СИЗ"
-  const row2 = tr(
-    tc(cellP("", {}), { width: COLS.code, vMerge: "continue" }),
-    tc(cellP("", {}), { width: COLS.position, vMerge: "continue" }),
-    tc(cellP("", {}), { width: COLS.count, vMerge: "continue" }),
-    tc(
-      cellP(
-        "Қолданыстағы нормаға сәйкес (согласно действующим нормам)",
-        { bold: true, size: 12 },
-      ),
-      { width: COLS.norm, shd: "EAF2FA" },
-    ),
-    tc(
-      cellP("Нақты берілгені (фактически выдано) Да/Нет", {
-        bold: true,
-        size: 12,
-      }),
-      { width: COLS.issued, shd: "EAF2FA" },
-    ),
-    tc(
-      cellP("ГОСТ, наличие сертификата", { bold: true, size: 12 }),
-      { width: COLS.cert, shd: "EAF2FA" },
-    ),
-    tc(cellP("", {}), { width: COLS.assess, vMerge: "continue" }),
-    tc(cellP("", {}), { width: COLS.note, vMerge: "continue" }),
-  );
-  return row1 + row2;
-}
-
-function ctrlRow(tag) {
-  return tr(
-    tc(cellRaw(tag), { width: TOTAL_WIDTH, gridSpan: COL_ORDER.length }),
-  );
-}
-
-function sectionTitleRow() {
-  return tr(
-    tc(
-      cellP("{section_title}", { bold: true, size: 18, align: "left" }),
-      { width: TOTAL_WIDTH, gridSpan: COL_ORDER.length, shd: "F2F2F2" },
-    ),
-  );
-}
-
-function dataRow() {
-  return tr(
-    tc(cellP("{code}", { size: 16 }), { width: COLS.code }),
-    tc(cellP("{position}", { size: 16, align: "left" }), {
-      width: COLS.position,
-    }),
-    tc(cellP("{count}", { size: 16 }), { width: COLS.count }),
-    tc(cellP("{normItems}", { size: 14, align: "left" }), {
-      width: COLS.norm,
-    }),
-    tc(cellP("{issuedFact}", { size: 16 }), { width: COLS.issued }),
-    tc(cellP("{certificate}", { size: 14 }), { width: COLS.cert }),
-    tc(cellP("{assessment}", { size: 14 }), { width: COLS.assess }),
-    tc(cellP("{note}", { size: 16 }), { width: COLS.note }),
-  );
-}
-
-function sizTable() {
-  const tblPr = `<w:tblPr><w:tblW w:w="${TOTAL_WIDTH}" w:type="dxa"/><w:tblLayout w:type="fixed"/><w:tblBorders><w:top w:val="single" w:sz="4" w:color="auto"/><w:left w:val="single" w:sz="4" w:color="auto"/><w:bottom w:val="single" w:sz="4" w:color="auto"/><w:right w:val="single" w:sz="4" w:color="auto"/><w:insideH w:val="single" w:sz="4" w:color="auto"/><w:insideV w:val="single" w:sz="4" w:color="auto"/></w:tblBorders></w:tblPr>`;
-  const grid = `<w:tblGrid>${COL_ORDER.map(
-    (w) => `<w:gridCol w:w="${w}"/>`,
-  ).join("")}</w:tblGrid>`;
-  const rows = [
-    tableHeader(),
-    ctrlRow("{#sections}"),
-    sectionTitleRow(),
-    ctrlRow("{#rows}"),
-    dataRow(),
-    ctrlRow("{/rows}"),
-    ctrlRow("{/sections}"),
-  ].join("");
-  return `<w:tbl>${tblPr}${grid}${rows}</w:tbl>`;
-}
-
-function signaturesBlock() {
-  return [
-    p("Өлшеуді жүргізген:                          Зертхананың аға маманы", {
-      size: 22,
-      before: 200,
-    }),
-    p(
-      "                                                                    Старший специалист лаборатории",
-      { size: 22 },
-    ),
-    p(
-      "Оценку проводил:                          {performer.position}    {performer.fullName}",
-      { size: 22 },
-    ),
-    p("Ұйымның өкілі:", { size: 22, before: 120 }),
-    p(
-      "Представитель организации:        {representative.position}    {representative.fullName}",
-      { size: 22 },
-    ),
-  ].join("");
-}
-
-// -------- Compose document.xml --------
-
-function buildDocumentXml() {
-  // Альбомная ориентация — таблица широкая (8 колонок).
-  const sectPr = `<w:sectPr><w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720" w:header="708" w:footer="708" w:gutter="0"/><w:cols w:space="708"/><w:docGrid w:linePitch="360"/></w:sectPr>`;
-
-  const body = `<w:body>${labHeader()}${protocolTitle()}${customerBlock()}${sizTable()}${signaturesBlock()}${sectPr}</w:body>`;
-
-  const docOpen = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">`;
-  return `${docOpen}${body}</w:document>`;
-}
-
-// -------- Build --------
-
-function build() {
-  const baseBuf = fs.readFileSync(BASE_TEMPLATE);
-  const zip = new PizZip(baseBuf);
-
-  const newRels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/><Relationship Id="rId6" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/webSettings" Target="webSettings.xml"/><Relationship Id="rId7" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/><Relationship Id="rId8" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes" Target="endnotes.xml"/><Relationship Id="rId12" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable" Target="fontTable.xml"/><Relationship Id="rId13" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/><Relationship Id="rId4" Type="http://schemas.microsoft.com/office/2007/relationships/stylesWithEffects" Target="stylesWithEffects.xml"/><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml" Target="../customXml/item1.xml"/></Relationships>`;
-
-  zip.file("word/document.xml", buildDocumentXml());
-  zip.file("word/_rels/document.xml.rels", newRels);
-
-  [
-    "word/footer1.xml",
-    "word/media/image1.png",
-    "word/media/image2.png",
-    "word/document.xml.new",
-  ].forEach((p) => {
-    if (zip.file(p)) zip.remove(p);
+  // Persist
+  zip.file("word/document.xml", xml);
+  const outDir = path.dirname(OUT_TEMPLATE);
+  if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
+  const out = zip.generate({
+    type: "nodebuffer",
+    mimeType:
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   });
-
-  const ct = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/customXml/itemProps1.xml" ContentType="application/vnd.openxmlformats-officedocument.customXmlProperties+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/word/stylesWithEffects.xml" ContentType="application/vnd.ms-word.stylesWithEffects+xml"/><Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/><Override PartName="/word/webSettings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.webSettings+xml"/><Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/><Override PartName="/word/endnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml"/><Override PartName="/word/fontTable.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml"/><Override PartName="/word/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/></Types>`;
-  zip.file("[Content_Types].xml", ct);
-
-  const out = zip.generate({ type: "nodebuffer" });
   fs.writeFileSync(OUT_TEMPLATE, out);
   console.log(`Wrote ${OUT_TEMPLATE} (${out.length} bytes)`);
+  console.log(`  document.xml size: ${xml.length} bytes`);
 }
 
-build();
+// ---------- A) top-level injection ----------
+
+function injectTopLevelPlaceholders(xml) {
+  // A.1) Protocol number appears twice in the title block:
+  //   "№1 " (Kazakh title: "№1 ХАТТАМАСЫ")  — UNIQUE
+  //   " №1" (Russian title: "ПРОТОКОЛ №1")  — UNIQUE
+  xml = replaceWtExact(xml, "\u21161 ", "\u2116{protocol.number} ");
+  xml = replaceWtExact(xml, " \u21161", " \u2116{protocol.number}");
+
+  // A.2) Customer name + address — appears as ONE single <w:t> in the
+  // "Тапсырыс берушінің атауы..." paragraph.
+  xml = replaceWtExact(
+    xml,
+    "\u0422\u041e\u041e \u00abKazEcoFood\u00bb, \u0410\u043b\u043c\u0430\u043d\u0438\u0441\u043a\u0430\u044f \u043e\u0431\u043b, \u041a\u0430\u0440\u0430\u0441\u0430\u0439\u0441\u043a\u0438\u0439 \u0440\u0430\u0439\u043e\u043d, \u0441\u0435\u043b\u043e \u041a\u043e\u043a\u043e\u0437\u0435\u043a, \u0443\u043b\u0438\u0446\u0430 \u041d\u0435\u0441\u0438\u0431\u0435\u043b\u0438, 715",
+    "\u0422\u041e\u041e \u00ab{customer.name}\u00bb, {customer.address}",
+  );
+
+  // A.3) measurementPlace — the "Өлшеу жүргізу орны" paragraph splits
+  // its text across many runs. Collapse the run sequence that starts
+  // with "ТОО «" and ends with ", 715" into a single placeholder run.
+  xml = collapseMeasurementPlaceRuns(xml);
+
+  // A.4) Date — original is plain text "«10» апреля 2026 г." (no
+  // MERGEFIELD in this template). Replace via a single <w:t>.
+  xml = replaceWtExact(
+    xml,
+    "\u00ab10\u00bb \u0430\u043f\u0440\u0435\u043b\u044f 2026 \u0433.",
+    "\u00ab{measurementDate.day}\u00bb {measurementDate.month} {measurementDate.year} \u0433.",
+  );
+
+  // A.5) Signature/footer block (paragraphs after the main table).
+  //   - "Исаева А.В."  -> {performer.fullName}
+  xml = replaceWtExact(
+    xml,
+    "\u0418\u0441\u0430\u0435\u0432\u0430 \u0410.\u0412.",
+    "{performer.fullName}",
+  );
+  //   - "Зертхананың аға маманы" -> single <w:t> Kazakh performer position?
+  // The schema only has performer.position (Russian); we leave the
+  // Kazakh static text untouched to preserve the visual layout and
+  // inject the Russian position by replacing the existing run that
+  // contains "ертхананың аға маманы" (… no, that's Kazakh text). The
+  // original document has, on the LAST paragraph of the performer
+  // line, the Russian fragment split as "Старший с" + "пециалист лабо"
+  // + "ратории". Collapse those three consecutive <w:t> values to a
+  // single placeholder.
+  xml = collapsePerformerPositionRussian(xml);
+
+  //   - representative.fullName "Богачев А.И."
+  xml = replaceWtExact(
+    xml,
+    "\u0411\u043e\u0433\u0430\u0447\u0435\u0432 \u0410.\u0418.",
+    "{representative.fullName}",
+  );
+  //   - representative.position is split: "Начальник по " + "БиОТ".
+  // Replace the first with the placeholder and blank the second.
+  xml = replaceWtExact(
+    xml,
+    "\u041d\u0430\u0447\u0430\u043b\u044c\u043d\u0438\u043a \u043f\u043e ",
+    "{representative.position}",
+  );
+  xml = replaceWtExact(xml, "\u0411\u0438\u041e\u0422", "");
+
+  return xml;
+}
+
+/**
+ * The "Өлшеу жүргізу орны (место проведения оценки): ТОО «KazEcoFood», …,
+ * 715" paragraph fragments the value text across many runs. Find the
+ * first run whose <w:t> starts with "ТОО «" AND the run sequence ends
+ * with the <w:t>", 715"</w:t>, then collapse that range to a single run
+ * carrying the FIRST run's <w:rPr> and the placeholder.
+ */
+function collapseMeasurementPlaceRuns(xml) {
+  const firstAnchor = '<w:t xml:space="preserve">\u0422\u041e\u041e \u00ab</w:t>';
+  let firstIdx = xml.indexOf(firstAnchor);
+  if (firstIdx === -1) {
+    // try the variant without xml:space
+    const alt = "<w:t>\u0422\u041e\u041e \u00ab</w:t>";
+    firstIdx = xml.indexOf(alt);
+    if (firstIdx === -1)
+      throw new Error("collapseMeasurementPlaceRuns: 'ТОО «' anchor not found");
+  }
+  // The run that contains this <w:t> starts a bit before.
+  const firstRunStart = xml.lastIndexOf("<w:r>", firstIdx);
+  const firstRunStartAttr = xml.lastIndexOf("<w:r ", firstIdx);
+  const runStart = Math.max(firstRunStart, firstRunStartAttr);
+  if (runStart === -1)
+    throw new Error("collapseMeasurementPlaceRuns: enclosing <w:r> not found");
+  const runEnd = findElementEnd(xml, "w:r", runStart);
+  const firstRunXml = xml.slice(runStart, runEnd);
+  const rPrMatch = firstRunXml.match(/<w:rPr>[\s\S]*?<\/w:rPr>/);
+  const rPr = rPrMatch ? rPrMatch[0] : "";
+
+  // Locate end run: the one containing <w:t...>, 715</w:t>
+  const endAnchor1 = '<w:t xml:space="preserve">, 715</w:t>';
+  const endAnchor2 = "<w:t>, 715</w:t>";
+  let endTextIdx = xml.indexOf(endAnchor1, runStart);
+  if (endTextIdx === -1) endTextIdx = xml.indexOf(endAnchor2, runStart);
+  if (endTextIdx === -1)
+    throw new Error("collapseMeasurementPlaceRuns: ', 715' anchor not found");
+  // End of enclosing run
+  const lastRunCloseEnd =
+    xml.indexOf("</w:r>", endTextIdx) + "</w:r>".length;
+
+  const replacement = `<w:r>${rPr}<w:t xml:space="preserve">{measurementPlace}</w:t></w:r>`;
+  return xml.slice(0, runStart) + replacement + xml.slice(lastRunCloseEnd);
+}
+
+/**
+ * Collapse the three Russian fragments of the performer position:
+ *   "Старший с" + "пециалист лабо" + "ратории"
+ * into a single run with {performer.position}, preserving the first
+ * fragment's <w:rPr>.
+ */
+function collapsePerformerPositionRussian(xml) {
+  const firstAnchor1 = '<w:t xml:space="preserve">\u0421\u0442\u0430\u0440\u0448\u0438\u0439 \u0441</w:t>';
+  const firstAnchor2 = '<w:t>\u0421\u0442\u0430\u0440\u0448\u0438\u0439 \u0441</w:t>';
+  let firstIdx = xml.indexOf(firstAnchor1);
+  if (firstIdx === -1) firstIdx = xml.indexOf(firstAnchor2);
+  if (firstIdx === -1)
+    throw new Error("collapsePerformerPositionRussian: 'Старший с' not found");
+  const runStartA = xml.lastIndexOf("<w:r>", firstIdx);
+  const runStartB = xml.lastIndexOf("<w:r ", firstIdx);
+  const runStart = Math.max(runStartA, runStartB);
+  if (runStart === -1)
+    throw new Error("collapsePerformerPositionRussian: enclosing <w:r> not found");
+  const runEnd = findElementEnd(xml, "w:r", runStart);
+  const firstRunXml = xml.slice(runStart, runEnd);
+  const rPrMatch = firstRunXml.match(/<w:rPr>[\s\S]*?<\/w:rPr>/);
+  const rPr = rPrMatch ? rPrMatch[0] : "";
+
+  const endAnchor1 = '<w:t xml:space="preserve">\u0440\u0430\u0442\u043e\u0440\u0438\u0438</w:t>';
+  const endAnchor2 = '<w:t>\u0440\u0430\u0442\u043e\u0440\u0438\u0438</w:t>';
+  let endTextIdx = xml.indexOf(endAnchor1, runStart);
+  if (endTextIdx === -1) endTextIdx = xml.indexOf(endAnchor2, runStart);
+  if (endTextIdx === -1)
+    throw new Error("collapsePerformerPositionRussian: 'ратории' not found");
+  const lastRunCloseEnd =
+    xml.indexOf("</w:r>", endTextIdx) + "</w:r>".length;
+
+  const replacement = `<w:r>${rPr}<w:t xml:space="preserve">{performer.position}</w:t></w:r>`;
+  return xml.slice(0, runStart) + replacement + xml.slice(lastRunCloseEnd);
+}
+
+// ---------- B) main table ----------
+
+/**
+ * Templatize the main PPE table:
+ *   - section header rows ("1. Администрация..." and "2. Производственный...")
+ *     are kept VERBATIM (their bilingual styling is part of the original
+ *     visual layout);
+ *   - all 13 admin data rows (rows under "1. Администрация...") are
+ *     replaced by ONE templated row wrapped with
+ *     {#adminRows}...{/adminRows};
+ *   - all 18 production data rows (rows under "2. Производственный...")
+ *     are replaced by ONE templated row wrapped with
+ *     {#productionRows}...{/productionRows}.
+ *
+ * Cell layouts differ between admin (6 cells, merged norm/issued/cert
+ * spans) and production (8 cells, every column distinct), so we use the
+ * FIRST data row of each section as the template for that section.
+ */
+function templatizeMainTable(xml) {
+  // Locate the two section header rows
+  const adminSecAnchor =
+    "<w:t>1. </w:t>"; // unique enough? probably not — disambiguate by combining with "Администрация"
+  // Instead, find "Администрация" as text fragment.
+  const adminAnchor = "\u0410\u0434\u043c\u0438\u043d\u0438\u0441\u0442\u0440\u0430\u0446\u0438\u044f"; // "Администрация"
+  // "Производственный" is split as "П" + "роизводственный" in the
+  // original XML. Use the suffix as anchor.
+  const prodAnchor = "\u0440\u043e\u0438\u0437\u0432\u043e\u0434\u0441\u0442\u0432\u0435\u043d\u043d\u044b\u0439"; // "роизводственный"
+
+  const adminSec = locateRowByAnchor(xml, adminAnchor);
+  const prodSec = locateRowByAnchor(xml, prodAnchor, adminSec.end);
+
+  // Find the end of the enclosing <w:tbl> (after prodSec)
+  const tblCloseIdx = xml.indexOf("</w:tbl>", prodSec.end);
+  if (tblCloseIdx === -1)
+    throw new Error("</w:tbl> not found after prod section row");
+
+  // FIRST admin data row sits right after adminSec.end
+  const adminRowStart = xml.indexOf("<w:tr ", adminSec.end);
+  if (adminRowStart === -1 || adminRowStart >= prodSec.start)
+    throw new Error("No admin data row found");
+  const adminRowEnd = findElementEnd(xml, "w:tr", adminRowStart);
+  const adminRowXml = xml.slice(adminRowStart, adminRowEnd);
+
+  // FIRST production data row sits right after prodSec.end
+  const prodRowStart = xml.indexOf("<w:tr ", prodSec.end);
+  if (prodRowStart === -1 || prodRowStart >= tblCloseIdx)
+    throw new Error("No production data row found");
+  const prodRowEnd = findElementEnd(xml, "w:tr", prodRowStart);
+  const prodRowXml = xml.slice(prodRowStart, prodRowEnd);
+
+  // Admin row has 6 cells:
+  //   [code, position(gridSpan=2), count, normItems(gridSpan=3), assessment, note]
+  // Production row has 8 cells:
+  //   [code, position(gridSpan=2), count, normItems, issuedFact, certificate, assessment, note]
+  const ADMIN_PH = [
+    "{code}",
+    "{position}",
+    "{count}",
+    "{normItems}",
+    "{assessment}",
+    "{note}",
+  ];
+  const PROD_PH = [
+    "{code}",
+    "{position}",
+    "{count}",
+    "{normItems}",
+    "{issuedFact}",
+    "{certificate}",
+    "{assessment}",
+    "{note}",
+  ];
+
+  const adminRowT = templatizeRow(adminRowXml, ADMIN_PH);
+  const prodRowT = templatizeRow(prodRowXml, PROD_PH);
+
+  const adminBlock = wrapBlockWithLoop(
+    adminRowT,
+    "{#adminRows}",
+    "{/adminRows}",
+  );
+  const prodBlock = wrapBlockWithLoop(
+    prodRowT,
+    "{#productionRows}",
+    "{/productionRows}",
+  );
+
+  // Splice:
+  //   [..adminSec.end]   -> keep
+  //   [adminSec.end..prodSec.start]   -> replace with adminBlock
+  //   [prodSec.start..prodSec.end]   -> keep
+  //   [prodSec.end..tblCloseIdx]   -> replace with prodBlock
+  //   [tblCloseIdx..]   -> keep
+  return (
+    xml.slice(0, adminSec.end) +
+    adminBlock +
+    xml.slice(prodSec.start, prodSec.end) +
+    prodBlock +
+    xml.slice(tblCloseIdx)
+  );
+}
+
+main();

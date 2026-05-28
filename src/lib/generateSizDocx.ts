@@ -5,7 +5,6 @@ import {
   TemplateRenderError,
 } from "./docs/engine";
 import { flatten } from "./docs/flatten";
-import { flattenSectionsRows } from "./docs/rows";
 
 const TEMPLATE_URL = "/templates/siz-protocol.docx";
 
@@ -30,8 +29,6 @@ export function renderSizBlob(
 export function buildTemplateContext(
   data: SizProtocol,
 ): Record<string, unknown> {
-  // docxtemplater 3.x не разворачивает теги с точкой как путь — раскладываем
-  // в плоские ключи и пробрасываем в каждый элемент вложенных циклов.
   const rootFlat = flatten({
     protocol: data.protocol,
     customer: data.customer,
@@ -41,9 +38,26 @@ export function buildTemplateContext(
   });
   rootFlat["measurementPlace"] = data.measurementPlace;
 
+  // The СИЗ template uses a fixed two-section layout that mirrors the
+  // original DOCX:
+  //   sections[0] -> adminRows       (rendered between the
+  //                                   "1. Администрация..." section row
+  //                                   and the "2. Производственный..."
+  //                                   section row)
+  //   sections[1] -> productionRows  (rendered after the
+  //                                   "2. Производственный..." row)
+  // Any extra sections beyond index 1 are appended to productionRows
+  // to avoid data loss.
+  const admin = data.sections[0]?.rows ?? [];
+  const productionRows: SizRow[] = [];
+  for (let i = 1; i < data.sections.length; i++) {
+    productionRows.push(...data.sections[i].rows);
+  }
+
   return {
     ...rootFlat,
-    sections: flattenSectionsRows(data.sections, mapRow, rootFlat),
+    adminRows: admin.map(mapRow),
+    productionRows: productionRows.map(mapRow),
   };
 }
 

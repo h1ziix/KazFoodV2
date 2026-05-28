@@ -1,20 +1,33 @@
+// scripts/build-cover-template.js
 // Build cover-protocol.docx template from source DOCX (file №1 "Обложка")
 // by injecting docxtemplater placeholders.
 //
-// The cover document is two identical halves (kk-KZ + ru-RU) with no
-// dynamic tables, loops or indicators — just a fixed layout populated by
-// a flat set of scalars. Each variable token appears twice (once per half)
-// — docxtemplater accepts the same placeholder repeated N times.
+// FIDELITY RULES (see scripts/lib/safe-injector.js for the contract):
+//   * We touch ONLY the inner text of specific <w:t> nodes.
+//   * We never rebuild <w:r>, <w:p> or <w:tbl> wrappers.
+//   * Every paragraph in the source that has no placeholder remains
+//     byte-identical in the generated template.
 //
-// Strategy: do exact-text replacement on the XML string. For tokens that
-// Word's spell checker split across multiple <w:t> runs we first close the
-// adjacent runs into a single one, then replace.
+// Strategy:
+//   1. For tokens that already live inside a single <w:t> node, use
+//      replaceTextNodeOnly().
+//   2. For tokens that Word's spell checker / direct edit fragmented
+//      across multiple adjacent <w:t> nodes in the SAME paragraph, use
+//      spliceAdjacentTextNodes(): the placeholder is spliced into the
+//      first <w:t>, the partner <w:t> nodes are emptied (their <w:r> /
+//      <w:rPr> wrappers stay intact, no spacing/page-layout changes).
 //
 // Usage: node scripts/build-cover-template.js
+
+"use strict";
 
 const fs = require("node:fs");
 const path = require("node:path");
 const PizZip = require("pizzip");
+const {
+  replaceTextNodeOnly,
+  spliceAdjacentTextNodes,
+} = require("./lib/safe-injector");
 
 const ROOT = path.resolve(__dirname, "..");
 
@@ -34,85 +47,6 @@ const OUT_DOCX = path.join(
   "cover-protocol.docx",
 );
 
-function escapeRegex(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-// Find every <w:t ...>TEXT</w:t> in `xml` whose body equals `exactText`
-// and replace the WHOLE node with a single <w:t xml:space="preserve">
-// containing `newText`. Returns { xml, replaced }.
-function replaceWholeRun(xml, exactText, newText) {
-  const escaped = escapeRegex(exactText);
-  const re = new RegExp(
-    `<w:t(?:\\s[^>]*)?>${escaped}</w:t>`,
-    "g",
-  );
-  let replaced = 0;
-  const next = xml.replace(re, () => {
-    replaced += 1;
-    return `<w:t xml:space="preserve">${escapeXml(newText)}</w:t>`;
-  });
-  return { xml: next, replaced };
-}
-
-function escapeXml(s) {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-// Collapse the sequence of runs:
-//   <w:r ...> <w:rPr>RPR_A</w:rPr> <w:t ...>A</w:t> </w:r>
-//   [<w:proofErr ...>/]*
-//   <w:r ...> <w:rPr>RPR_B</w:rPr> <w:t ...>B</w:t> </w:r>
-// into a single run containing `merged` (text). The replacement uses
-// RPR_A as the run formatting. Returns { xml, replaced } across all
-// non-overlapping matches.
-function collapseTwoRuns(xml, textA, textB, merged) {
-  const a = escapeRegex(textA);
-  const b = escapeRegex(textB);
-  // Limit the [\\s\\S] runs to at most 600 chars to avoid catastrophic
-  // backtracking and to localise matches.
-  const re = new RegExp(
-    `<w:r\\b[^>]*>([\\s\\S]{0,600}?)<w:t(?:\\s[^>]*)?>${a}</w:t>\\s*</w:r>` +
-      `(?:\\s*<w:proofErr[^>]*/>|\\s*<w:bookmarkStart[^>]*/>|\\s*<w:bookmarkEnd[^>]*/>)*` +
-      `\\s*<w:r\\b[^>]*>[\\s\\S]{0,600}?<w:t(?:\\s[^>]*)?>${b}</w:t>\\s*</w:r>`,
-    "g",
-  );
-  let replaced = 0;
-  const next = xml.replace(re, (full, rPrInnerA) => {
-    replaced += 1;
-    const rPrMatch = rPrInnerA.match(/<w:rPr>[\s\S]*?<\/w:rPr>/);
-    const rPr = rPrMatch ? rPrMatch[0] : "";
-    return `<w:r>${rPr}<w:t xml:space="preserve">${escapeXml(merged)}</w:t></w:r>`;
-  });
-  return { xml: next, replaced };
-}
-
-// Collapse 4 adjacent runs in one pass.
-function collapseFourRuns(xml, textA, textB, textC, textD, merged) {
-  const [a, b, c, d] = [textA, textB, textC, textD].map(escapeRegex);
-  const re = new RegExp(
-    `<w:r\\b[^>]*>([\\s\\S]{0,600}?)<w:t(?:\\s[^>]*)?>${a}</w:t>\\s*</w:r>` +
-      `(?:\\s*<w:proofErr[^>]*/>|\\s*<w:bookmarkStart[^>]*/>|\\s*<w:bookmarkEnd[^>]*/>)*` +
-      `\\s*<w:r\\b[^>]*>[\\s\\S]{0,600}?<w:t(?:\\s[^>]*)?>${b}</w:t>\\s*</w:r>` +
-      `(?:\\s*<w:proofErr[^>]*/>|\\s*<w:bookmarkStart[^>]*/>|\\s*<w:bookmarkEnd[^>]*/>)*` +
-      `\\s*<w:r\\b[^>]*>[\\s\\S]{0,600}?<w:t(?:\\s[^>]*)?>${c}</w:t>\\s*</w:r>` +
-      `(?:\\s*<w:proofErr[^>]*/>|\\s*<w:bookmarkStart[^>]*/>|\\s*<w:bookmarkEnd[^>]*/>)*` +
-      `\\s*<w:r\\b[^>]*>[\\s\\S]{0,600}?<w:t(?:\\s[^>]*)?>${d}</w:t>\\s*</w:r>`,
-    "g",
-  );
-  let replaced = 0;
-  const next = xml.replace(re, (full, rPrInnerA) => {
-    replaced += 1;
-    const rPrMatch = rPrInnerA.match(/<w:rPr>[\s\S]*?<\/w:rPr>/);
-    const rPr = rPrMatch ? rPrMatch[0] : "";
-    return `<w:r>${rPr}<w:t xml:space="preserve">${escapeXml(merged)}</w:t></w:r>`;
-  });
-  return { xml: next, replaced };
-}
-
 function main() {
   const src = findSourceDocx();
   console.log(`Source: ${src}`);
@@ -121,78 +55,88 @@ function main() {
   let doc = zip.file("word/document.xml").asText();
   const lenBefore = doc.length;
 
-  // 1. Collapse Word's spell-check splits BEFORE any text replacement.
-  //
-  //   "Балян" + "  Л.Н."  →  "{customer.directorName}"  (×2)
-  //   "Алматы" + " 202" + "6" + " г."  →  "{city} {reportYear} г."  (×2)
-  //   "Алматы 2020" + " г."  →  "{city} {archiveYear} г."  (×2)
-  //   "ТОО " + "«Центр ... труда»"  →  "{performer.organization}"  (×2)
-  const collapses = [
+  // ---- (1) splice fragmented multi-<w:t> tokens ------------------------
+  // Each entry maps a list of consecutive <w:t> bodies (in source order)
+  // to a single placeholder. The first <w:t> receives the placeholder,
+  // partners are emptied. All <w:r>/<w:rPr>/<w:proofErr>/<w:bookmark*>
+  // between them remain byte-identical.
+  const spliceOps = [
     {
-      fn: () => collapseTwoRuns(doc, "Балян", "  Л.Н.", "{customer.directorName}"),
       label: "Балян +   Л.Н.  →  {customer.directorName}",
+      runs: ["Балян", "  Л.Н."],
+      placeholder: "{customer.directorName}",
+      requireMin: 2,
+      requireMax: 2,
     },
     {
-      fn: () =>
-        collapseFourRuns(doc, "Алматы", " 202", "6", " г.", "{city} {reportYear} г."),
       label: "Алматы +  202 + 6 +  г.  →  {city} {reportYear} г.",
+      runs: ["Алматы", " 202", "6", " г."],
+      placeholder: "{city} {reportYear} г.",
+      requireMin: 2,
+      requireMax: 2,
     },
     {
-      fn: () =>
-        collapseTwoRuns(doc, "Алматы 2020", " г.", "{city} {archiveYear} г."),
       label: "Алматы 2020 +  г.  →  {city} {archiveYear} г.",
+      runs: ["Алматы 2020", " г."],
+      placeholder: "{city} {archiveYear} г.",
+      requireMin: 2,
+      requireMax: 2,
     },
     {
-      fn: () =>
-        collapseTwoRuns(
-          doc,
-          "ТОО ",
-          "«Центр экспертной оценки условий труда»",
-          "{performer.organization}",
-        ),
       label: "ТОО  + «Центр…»  →  {performer.organization}",
+      runs: ["ТОО ", "«Центр экспертной оценки условий труда»"],
+      placeholder: "{performer.organization}",
+      requireMin: 2,
+      requireMax: 2,
     },
   ];
-  for (const c of collapses) {
-    const out = c.fn();
+
+  for (const op of spliceOps) {
+    const out = spliceAdjacentTextNodes(doc, op.runs, op.placeholder, {
+      requireMin: op.requireMin,
+      requireMax: op.requireMax,
+    });
     doc = out.xml;
-    console.log(`collapse ${c.label}: ${out.replaced} occurrence(s)`);
-    if (out.replaced === 0) {
-      throw new Error(`Expected at least 1 collapse for: ${c.label}`);
-    }
+    console.log(`splice  ${op.label}: ${out.replaced}`);
   }
 
-  // 2. Whole-run replacements for tokens that already live in their own
-  //    single run.
-  const singleRunOps = [
+  // ---- (2) single-<w:t> placeholder injections -------------------------
+  // Each entry rewrites only the text content of every matching <w:t>.
+  // The <w:t> attributes and ALL surrounding XML are preserved.
+  const textOps = [
     {
       exact: "ТОО  «KazEcoFood»",
-      replacement: "{customer.organization}",
-      expectedMin: 4,
+      placeholder: "{customer.organization}",
+      requireMin: 4,
+      requireMax: 4,
     },
     {
       exact: "Дьяченко В. Г.",
-      replacement: "{performer.directorName}",
-      expectedMin: 2,
+      placeholder: "{performer.directorName}",
+      requireMin: 2,
+      requireMax: 2,
     },
     {
       exact: "Генеральный директор",
-      replacement: "{performer.directorPosition}",
-      expectedMin: 2,
+      placeholder: "{performer.directorPosition}",
+      requireMin: 2,
+      requireMax: 2,
     },
   ];
-  for (const op of singleRunOps) {
-    const out = replaceWholeRun(doc, op.exact, op.replacement);
+
+  for (const op of textOps) {
+    const out = replaceTextNodeOnly(doc, op.exact, op.placeholder, {
+      requireMin: op.requireMin,
+      requireMax: op.requireMax,
+    });
     doc = out.xml;
-    console.log(`replace ${op.exact}  →  ${op.replacement}: ${out.replaced} run(s)`);
-    if (out.replaced < op.expectedMin) {
-      throw new Error(
-        `Expected ≥${op.expectedMin} replacements for "${op.exact}", got ${out.replaced}`,
-      );
-    }
+    console.log(
+      `text    "${op.exact}" → ${op.placeholder}: ${out.replaced}`,
+    );
   }
 
-  // 3. Sanity check: no source literals remain.
+  // ---- (3) sanity scan -------------------------------------------------
+  // No source-literal customer/performer data should remain.
   const forbidden = [
     "KazEcoFood",
     "Балян",
@@ -201,17 +145,22 @@ function main() {
     "Алматы",
     "«Центр экспертной оценки",
   ];
+  let leaks = 0;
   for (const lit of forbidden) {
     if (doc.includes(lit)) {
-      console.warn(`  WARN: source literal still present in template: "${lit}"`);
+      console.warn(`  WARN: source literal still present: "${lit}"`);
+      leaks += 1;
     }
+  }
+  if (leaks > 0) {
+    throw new Error(`Cover template still contains ${leaks} source literal(s).`);
   }
 
   console.log(
     `document.xml: ${lenBefore} → ${doc.length} bytes (Δ ${doc.length - lenBefore})`,
   );
 
-  // 4. Write the modified document back.
+  // ---- (4) emit --------------------------------------------------------
   zip.file("word/document.xml", doc);
   const outDir = path.dirname(OUT_DOCX);
   if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });

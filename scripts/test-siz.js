@@ -149,20 +149,6 @@ function mapRow(r) {
   };
 }
 
-function mapSection(s, rootFlat) {
-  return {
-    ...rootFlat,
-    section_number: s.number,
-    section_title: s.title,
-    rows: s.rows.map((r) => ({
-      ...rootFlat,
-      section_number: s.number,
-      section_title: s.title,
-      ...mapRow(r),
-    })),
-  };
-}
-
 function buildContext(data) {
   const rootFlat = flatten({
     protocol: data.protocol,
@@ -172,9 +158,15 @@ function buildContext(data) {
     representative: data.representative,
   });
   rootFlat["measurementPlace"] = data.measurementPlace;
+  const admin = (data.sections[0] && data.sections[0].rows) || [];
+  const productionRows = [];
+  for (let i = 1; i < data.sections.length; i++) {
+    productionRows.push(...data.sections[i].rows);
+  }
   return {
     ...rootFlat,
-    sections: data.sections.map((s) => mapSection(s, rootFlat)),
+    adminRows: admin.map(mapRow),
+    productionRows: productionRows.map(mapRow),
   };
 }
 

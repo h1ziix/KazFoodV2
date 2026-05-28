@@ -106,8 +106,10 @@ export interface SummaryPlaceLike<F> {
  * For each (place, workplace, factor) tuple emit one row. The very
  * first row of every NEW place carries `showSection: true` together
  * with `placeNumber` / `placeName`; the very first row of every
- * workplace carries `code` / `profession` / `count`, the rest leave
- * those columns blank so the rendered table matches the source DOCX.
+ * workplace carries `firstFactor: true` plus `code` / `profession` /
+ * `count`; subsequent factor rows in the same workplace carry
+ * `firstFactor: false` and empty leading columns so vertical-merge
+ * cells in the template render their continuation form.
  */
 export function flattenWorkplaceFactors<F>(
   places: SummaryPlaceLike<F>[],
@@ -121,6 +123,8 @@ export function flattenWorkplaceFactors<F>(
       for (const factor of wp.factors) {
         rows.push({
           showSection: firstWorkplace && firstFactor,
+          firstFactor,
+          notFirstFactor: !firstFactor,
           placeNumber: place.number,
           placeName: place.name,
           code: firstFactor ? wp.code : "",

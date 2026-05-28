@@ -165,6 +165,8 @@ for (const place of data.places) {
     for (const factor of wp.factors) {
       rows.push({
         showSection: firstWorkplace && firstFactor,
+        firstFactor,
+        notFirstFactor: !firstFactor,
         placeNumber: place.number,
         placeName: place.name,
         code: firstFactor ? wp.code : "",
@@ -190,27 +192,53 @@ const buf = readFileSync("public/templates/summary-protocol.docx");
 const zip = new PizZip(buf);
 const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
 
-try {
-  doc.render(ctx);
-  const out = doc.getZip().generate({
-    type: "nodebuffer",
-    mimeType:
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  });
-  writeFileSync("test-summary-output.docx", out);
-  console.log("Сводный протокол: ✓ PASS, размер:", out.length, "байт");
-  console.log("  строк в основной таблице:", rows.length);
-  console.log("  приборов СИ:", data.measuringTools.length);
-} catch (e) {
-  console.error("Сводный протокол: ✗ FAIL");
-  console.error(e.message);
-  if (e.properties && e.properties.errors) {
-    e.properties.errors.forEach((err) => {
-      console.error("  -", err.message);
-      if (err.properties && err.properties.explanation) {
-        console.error("    ", err.properties.explanation);
-      }
-    });
+(async () => {
+  const { validateDocxBuffer } = await import("./lib/validate-docx.mjs");
+
+  // 1. Validate the TEMPLATE before render.
+  try {
+    validateDocxBuffer(buf, "template");
+    console.log("Template validation: ✓");
+  } catch (e) {
+    console.error("Template validation: ✗");
+    console.error(e.message);
+    process.exit(1);
   }
-  process.exit(1);
-}
+
+  try {
+    doc.render(ctx);
+    const out = doc.getZip().generate({
+      type: "nodebuffer",
+      mimeType:
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    });
+
+    // 2. Validate RENDERED output before writing.
+    try {
+      validateDocxBuffer(out, "rendered");
+      console.log("Rendered validation: ✓");
+    } catch (e) {
+      console.error("Rendered validation: ✗");
+      console.error(e.message);
+      writeFileSync("test-summary-output.docx", out); // write anyway for inspection
+      process.exit(1);
+    }
+
+    writeFileSync("test-summary-output.docx", out);
+    console.log("Сводный протокол: ✓ PASS, размер:", out.length, "байт");
+    console.log("  строк в основной таблице:", rows.length);
+    console.log("  приборов СИ:", data.measuringTools.length);
+  } catch (e) {
+    console.error("Сводный протокол: ✗ FAIL");
+    console.error(e.message);
+    if (e.properties && e.properties.errors) {
+      e.properties.errors.forEach((err) => {
+        console.error("  -", err.message);
+        if (err.properties && err.properties.explanation) {
+          console.error("    ", err.properties.explanation);
+        }
+      });
+    }
+    process.exit(1);
+  }
+})();

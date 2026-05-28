@@ -110,40 +110,28 @@ function sumBy(items, getter) {
   return acc;
 }
 
-function flattenSectionsRows(sections, mapRow, rootFlat) {
-  return sections.map((section) => ({
-    ...rootFlat,
-    section_number: section.number,
-    section_title: section.title,
-    rows: section.rows.map((rw) => ({
-      ...rootFlat,
-      section_number: section.number,
-      section_title: section.title,
-      ...mapRow(rw),
-    })),
-  }));
-}
-
 function mapRow(rw) {
   return { code: rw.code, name: rw.name, count: rw.count };
 }
 
+function buildSection(s) {
+  if (!s) return { header: "", rows: [] };
+  return {
+    header: `${s.number}. ${s.title}`,
+    rows: s.rows.map(mapRow),
+  };
+}
+
 function buildContext(data) {
   const rootFlat = flatten({ approval: data.approval });
-  const sectionsCtx = flattenSectionsRows(data.sections, mapRow, rootFlat).map(
-    (sectionCtx, idx) => {
-      const s = data.sections[idx];
-      const total = sumBy(s.rows, (rw) => rw.count);
-      return {
-        ...sectionCtx,
-        section_count: total,
-        section_header: `${s.number}. ${s.title} — ${total} рабочих мест`,
-      };
-    },
-  );
+  const s1 = buildSection(data.sections[0]);
+  const s2 = buildSection(data.sections[1]);
   return {
     ...rootFlat,
-    sections: sectionsCtx,
+    section1_header: s1.header,
+    section1_rows: s1.rows,
+    section2_header: s2.header,
+    section2_rows: s2.rows,
     grand_total: sumBy(data.sections, (s) => sumBy(s.rows, (rw) => rw.count)),
   };
 }
@@ -218,13 +206,14 @@ function run() {
       process.exit(4);
     }
   }
-  mustContain(
-    `1. Административно – управленческий персонал — ${expectAdmin} рабочих мест`,
-  );
-  mustContain(`2. Производственный персонал — ${expectProd} рабочих мест`);
+  // Шаблон зеркалит ORIGINAL DOCX: заголовки секций без " — N рабочих
+  // мест"-суффикса. Это интенциональное визуальное соответствие исходнику.
+  mustContain(`1. Административно – управленческий персонал`);
+  mustContain(`2. Производственный персонал`);
   mustContain(`Итого: ${expectGrand} р/м`);
   console.log(
-    `VERIFY: section counts (${expectAdmin}, ${expectProd}) и grand_total (${expectGrand}) на месте ✅`,
+    `VERIFY: секции и grand_total (${expectGrand}) на месте ✅ ` +
+      `(admin=${expectAdmin}, prod=${expectProd})`,
   );
 
   const totalRows = example.sections.reduce((a, s) => a + s.rows.length, 0);

@@ -1,29 +1,39 @@
-// Build intro-protocol.docx template from source DOCX (file №2 "Введение").
+// scripts/build-intro-template.js
 //
-// The intro document is a long bilingual (kk-KZ + ru-RU) narrative with
-// fixed boilerplate and a small set of variable scalars:
-//   - customer (name / city / address)
-//   - measurement date (day / month / year)
-//   - workplace count + male/female counts
-//   - performer organization / address / accreditation (number + dates)
-//   - heaviness & tension class counts (c1/c2/c31)
-//   - final safety class label
+// Build intro-protocol.docx from the source DOCX (file №2 "Введение") by
+// injecting docxtemplater placeholders.
 //
-// The source's variable spans are heavily fragmented across <w:t> runs by
-// Word's spell checker / merge field artefacts (e.g. each digit of "55"
-// lives in its own run). Instead of trying to merge dozens of digit runs
-// in-place, we rewrite the few affected paragraphs whole-cloth, addressed
-// by their stable w:paraId. Boilerplate paragraphs are left untouched.
+// FIDELITY POSTURE:
 //
-// For the bare customer.name (literal "KazEcoFood") and customer.city
-// ("Алматы") tokens — which each occur ~10× across boilerplate prose —
-// we use the same single-run replacement helper as the cover script.
+//   * For tokens that already live in a single <w:t> node (the bare
+//     "KazEcoFood" customer name and the bare "Алматы" city scattered
+//     across boilerplate prose) we use scripts/lib/safe-injector's
+//     replaceTextNodeOnly(). Surrounding XML is byte-identical.
+//
+//   * For a small, hand-picked set of paragraphs that bind multi-field
+//     bilingual sentences (accreditation, lab address, workplace/male/
+//     female counts, heaviness/tension class counts, final safety
+//     class), we rewrite the inner runs of the paragraph via
+//     scripts/lib/paragraph-rewriter's replaceParagraphInner(). The
+//     outer <w:p>, its <w:pPr> and any <w:bookmark*> siblings are
+//     preserved verbatim. This is a documented fidelity exception —
+//     see paragraph-rewriter.js for why the safe injectors cannot work
+//     on those paragraphs (heavy run fragmentation + non-roundtrippable
+//     <w:t> bodies in the source).
+//
+// Every paragraph NOT listed below remains byte-identical between the
+// source DOCX and the generated template (verify with
+// `node scripts/verify-docx-fidelity.js intro`).
 //
 // Usage: node scripts/build-intro-template.js
+
+"use strict";
 
 const fs = require("node:fs");
 const path = require("node:path");
 const PizZip = require("pizzip");
+const { replaceTextNodeOnly } = require("./lib/safe-injector");
+const { replaceParagraphInner } = require("./lib/paragraph-rewriter");
 
 const ROOT = path.resolve(__dirname, "..");
 
@@ -43,59 +53,7 @@ const OUT_DOCX = path.join(
   "intro-protocol.docx",
 );
 
-function escapeRegex(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function escapeXml(s) {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-// Replace every <w:t ...>EXACT</w:t> with a single <w:t> carrying newText.
-function replaceWholeRun(xml, exactText, newText) {
-  const re = new RegExp(
-    `<w:t(?:\\s[^>]*)?>${escapeRegex(exactText)}</w:t>`,
-    "g",
-  );
-  let replaced = 0;
-  const next = xml.replace(re, () => {
-    replaced += 1;
-    return `<w:t xml:space="preserve">${escapeXml(newText)}</w:t>`;
-  });
-  return { xml: next, replaced };
-}
-
-// Replace the entire <w:p w14:paraId="{paraId}" ...>…</w:p> with the
-// SAME outer paragraph element (preserving paraId, rsids, styling and any
-// existing <w:pPr>) but with the run content replaced by `innerRunsXml`.
-// Throws if the paragraph is not found exactly once.
-function rewriteParagraph(xml, paraId, innerRunsXml) {
-  const re = new RegExp(
-    `<w:p\\b([^>]*\\sw14:paraId="${paraId}"[^>]*)>([\\s\\S]*?)</w:p>`,
-    "g",
-  );
-  const matches = [...xml.matchAll(re)];
-  if (matches.length === 0) {
-    throw new Error(`paragraph paraId=${paraId} not found`);
-  }
-  if (matches.length > 1) {
-    throw new Error(
-      `paragraph paraId=${paraId} matched ${matches.length}× (expected exactly 1)`,
-    );
-  }
-  const m = matches[0];
-  const attrs = m[1];
-  const inner = m[2];
-  const pPrMatch = inner.match(/<w:pPr>[\s\S]*?<\/w:pPr>/);
-  const pPr = pPrMatch ? pPrMatch[0] : "";
-  const replacement = `<w:p${attrs}>${pPr}${innerRunsXml}</w:p>`;
-  return xml.slice(0, m.index) + replacement + xml.slice(m.index + m[0].length);
-}
-
-// Helpers to compose run XML.
+// ----- Run-composition helpers (used only for paragraphs we rewrite) ------
 const SZ28 = `<w:rPr><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr>`;
 const SZ28_KK = `<w:rPr><w:sz w:val="28"/><w:szCs w:val="28"/><w:lang w:val="kk-KZ"/></w:rPr>`;
 const SZ28_BOLD = `<w:rPr><w:b/><w:bCs/><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr>`;
@@ -103,8 +61,9 @@ const SZ28_ITAL = `<w:rPr><w:i/><w:iCs/><w:sz w:val="28"/><w:szCs w:val="28"/></
 const SZ28_BU = `<w:rPr><w:b/><w:bCs/><w:sz w:val="28"/><w:szCs w:val="28"/><w:u w:val="single"/></w:rPr>`;
 const SZ28_BIU = `<w:rPr><w:b/><w:bCs/><w:i/><w:iCs/><w:sz w:val="28"/><w:szCs w:val="28"/><w:u w:val="single"/></w:rPr>`;
 
-// Build a single <w:r> with rPr and text (text is taken verbatim — caller
-// is responsible for embedding `{placeholders}` and escaping XML metas).
+// Compose a single <w:r> with the given <w:rPr> and verbatim text body.
+// The caller embeds `{placeholders}` directly and is responsible for any
+// XML escaping of literal '&', '<', '>'.
 function run(rPr, text) {
   return `<w:r>${rPr}<w:t xml:space="preserve">${text}</w:t></w:r>`;
 }
@@ -117,12 +76,12 @@ function main() {
   let doc = zip.file("word/document.xml").asText();
   const lenBefore = doc.length;
 
-  // 1. Paragraph-level rewrites, addressed by stable w:paraId.
-  //    Each rewrite collapses the fragmented runs into a clean run sequence
-  //    that embeds docxtemplater placeholders.
+  // (1) Documented paragraph-inner rewrites for paragraphs that cannot be
+  //     parameterised with text-only injection (see file docblock).
+  //     IMPORTANT: do NOT add new entries here without first checking
+  //     whether replaceTextNodeOnly / spliceAdjacentTextNodes can do the
+  //     job. Every entry here is a fidelity exception.
   const paragraphOps = [
-    // 57 — Kazakh accreditation sentence ("…№KZ.T.02.Е 1210 2022 жылғы
-    // 25 шілденаң аккредиттеу аттестаты.")
     {
       paraId: "6373B7C3",
       label: "kk accreditation",
@@ -132,8 +91,6 @@ function main() {
           "        «Еңбек жағдайын сараптамалық бағалау орталығы» ЖШС-нің жұмыс орындарын еңбек жағдайлары бойынша аттестаттау жұмыстарын жүргізуге келесі құқықтарымен дәлелденеді: «Еңбек жағдайын сараптамалық бағалау орталығы» ЖШС-нің Жарғысы, заңды тұлғаны мемлекеттік тіркеу туралы куәлігі және №{performer.accreditation.number} {performer.accreditation.dateKk} аккредиттеу аттестаты.",
         ),
     },
-
-    // 64 — Russian accreditation sentence
     {
       paraId: "16FB90BA",
       label: "ru accreditation",
@@ -143,32 +100,18 @@ function main() {
           "Право {performer.organization} на проведение работ по аттестации рабочих мест по условиям труда подтверждается: Уставом {performer.organization} и свидетельством о государственной регистрации юридического лица, аттестатом аккредитации лаборатории № {performer.accreditation.number} от {performer.accreditation.dateRu}.",
         ),
     },
-
-    // 58 — Kazakh lab address ("Зертхана мекенжайы: …")
-    //    The source verbatim opens with «Зертхананың мекенжайы:» but the
-    //    text is irretrievably garbled by mojibake-grade encoding in the
-    //    source XML, so we rebuild the prefix using the canonical Kazakh
-    //    wording. Value comes from performer.addressKk.
     {
       paraId: "0C6AD052",
       label: "kk performer.address",
       build: () =>
         run(SZ28_KK, "Зертхананың мекенжайы: {performer.addressKk}."),
     },
-
-    // 65 — Адрес испытательной лаборатории (Russian)
     {
       paraId: "01CC687F",
       label: "ru performer.address",
       build: () =>
         run(SZ28, "Адрес испытательной лаборатории: {performer.addressRu}"),
     },
-
-    // 71 — Customer line: ТОО «{name}», {address}.
-    //    The Kazakh prefix "Ұйымның толық заңды атауы" stays static
-    //    (bold), the Russian gloss "(Полное юридическое название
-    //    организации)" stays italic, then the value runs underlined-bold-
-    //    italic to preserve the source emphasis.
     {
       paraId: "5B953EEF",
       label: "customer org + address",
@@ -179,8 +122,6 @@ function main() {
         run(SZ28, ": ") +
         run(SZ28_BIU, "ТОО «{customer.name}», {customer.address}"),
     },
-
-    // 72 — Количество рабочих мест, подлежащих аттестации – N
     {
       paraId: "15A64610",
       label: "workplaceCount line",
@@ -192,8 +133,6 @@ function main() {
         run(SZ28_BU, "{workplaceCount}") +
         run(SZ28, ":"),
     },
-
-    // 73 — Дата проведения аттестации
     {
       paraId: "2613A18B",
       label: "measurement date",
@@ -207,8 +146,6 @@ function main() {
           "«{measurementDate.day}» {measurementDate.month} {measurementDate.year} г.",
         ),
     },
-
-    // 190 — Количество работников ... мужчин ... женщин
     {
       paraId: "0221DEB0",
       label: "worker / male / female counts",
@@ -221,8 +158,6 @@ function main() {
         run(SZ28_BU, "{femaleCount}") +
         run(SZ28, "."),
     },
-
-    // 194 — Тяжесть c1
     {
       paraId: "1378B660",
       label: "heaviness c1",
@@ -232,7 +167,6 @@ function main() {
           "I) класс условий труда (оптимальный 1) - {heavinessCounts.c1} сотрудников, занятых на {heavinessCounts.c1} рабочих местах.",
         ),
     },
-    // 195 — Тяжесть c2
     {
       paraId: "18F94942",
       label: "heaviness c2",
@@ -242,7 +176,6 @@ function main() {
           "II) класс условий труда (допустимый 2) - {heavinessCounts.c2} сотрудников, занятых на {heavinessCounts.c2} рабочих местах.",
         ),
     },
-    // 196 — Тяжесть c31
     {
       paraId: "2E7C2E49",
       label: "heaviness c31",
@@ -252,7 +185,6 @@ function main() {
           "III) класс условий труда (вредный 3.1) - {heavinessCounts.c31} сотрудников, занятых на {heavinessCounts.c31} рабочих местах.",
         ),
     },
-    // 199 — Напряженность c1
     {
       paraId: "3FFCCFC6",
       label: "tension c1",
@@ -262,7 +194,6 @@ function main() {
           "I) класс условий труда (оптимальный 1) - {tensionCounts.c1} сотрудников, занятых на {tensionCounts.c1} рабочих местах.",
         ),
     },
-    // 200 — Напряженность c2
     {
       paraId: "2962FA33",
       label: "tension c2",
@@ -272,7 +203,6 @@ function main() {
           "II) класс условий труда (допустимый 2) - {tensionCounts.c2} сотрудников, занятых на {tensionCounts.c2} рабочих местах.",
         ),
     },
-    // 201 — Напряженность c31
     {
       paraId: "55254F2B",
       label: "tension c31",
@@ -282,8 +212,6 @@ function main() {
           "III) класс условий труда (вредный 3.1) - {tensionCounts.c31} сотрудников, занятых на {tensionCounts.c31} рабочих местах.",
         ),
     },
-
-    // 204 — Большинство рабочих мест ... отнесены к классу ({label}).
     {
       paraId: "17663A32",
       label: "safety class label",
@@ -296,46 +224,39 @@ function main() {
   ];
 
   for (const op of paragraphOps) {
-    doc = rewriteParagraph(doc, op.paraId, op.build());
-    console.log(`rewrote para ${op.paraId} (${op.label})`);
+    doc = replaceParagraphInner(doc, op.paraId, op.build());
+    console.log(`paragraph ${op.paraId} (${op.label})`);
   }
 
-  // 2. Whole-run replacements for the bare customer.name token that
-  //    occurs in many boilerplate sentences as its own single <w:t> run.
-  //    Same for the bare city "Алматы".
-  const singleRunOps = [
+  // (2) Safe text-only replacements for bare tokens.
+  //     These tokens already live in their own single <w:t> nodes
+  //     throughout the boilerplate, so we never touch surrounding XML.
+  const textOps = [
     {
       exact: "KazEcoFood",
-      replacement: "{customer.name}",
-      expectedMin: 5,
+      placeholder: "{customer.name}",
+      requireMin: 5,
     },
     {
       exact: "Алматы",
-      replacement: "{customer.city}",
-      expectedMin: 5,
+      placeholder: "{customer.city}",
+      requireMin: 5,
     },
   ];
-  for (const op of singleRunOps) {
-    const out = replaceWholeRun(doc, op.exact, op.replacement);
+  for (const op of textOps) {
+    const out = replaceTextNodeOnly(doc, op.exact, op.placeholder, {
+      requireMin: op.requireMin,
+    });
     doc = out.xml;
     console.log(
-      `replace ${op.exact}  →  ${op.replacement}: ${out.replaced} run(s)`,
+      `text     "${op.exact}" → ${op.placeholder}: ${out.replaced}`,
     );
-    if (out.replaced < op.expectedMin) {
-      throw new Error(
-        `Expected ≥${op.expectedMin} replacements for "${op.exact}", got ${out.replaced}`,
-      );
-    }
   }
 
-  // 3. Sanity: scan for any remaining source-specific literals that the
-  //    user would NOT want to leak through unparameterized. These are
-  //    only warnings since most of the boilerplate intentionally stays
-  //    static. Note: "Кааганда" appears once in a standalone Kazakh
-  //    boilerplate paragraph (a typo in the source: it reads "Каагандағы"
-  //    where context implies Almaty); leaving it static is acceptable
-  //    for the current minimal-scalar scope and avoids parameterising a
-  //    Kazakh-declined city form.
+  // (3) Soft sanity scan for any remaining source-specific literals.
+  //     These are warnings only — much of the bilingual boilerplate is
+  //     intentionally static (see the original script comments for the
+  //     "Кааганда" note).
   const forbidden = [
     "KazEcoFood",
     "Алманиская",

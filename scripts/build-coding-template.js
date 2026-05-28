@@ -1,30 +1,53 @@
 /**
  * Сборка DOCX-шаблона для документа №13 «Кодировка рабочих мест».
  *
- * Структура шаблона:
- *   • Блок «УТВЕРЖДАЮ» (правый верх).
- *   • Заголовок «Жұмыс орнын кодтау / Кодировка рабочих мест».
- *   • Таблица 3 колонки (код / название / кол-во):
- *       header → {#sections} → section-header (заголовок с derived count)
- *                            → {#rows} data {/rows}
- *                          {/sections}
- *       → grand-total строка.
+ * SOURCE OF TRUTH: оригинальный референсный DOCX
+ *   "3. Кодировка каз-рус kazfood.docx"
+ * лежит в корне проекта. Этот скрипт ОТКРЫВАЕТ его как PizZip,
+ * выполняет ТОЛЬКО хирургические правки внутри `word/document.xml`:
  *
- * Использует public/templates/lighting-protocol.docx как базу styles/theme.
+ *   1. В существующих абзацах шапки «УТВЕРЖДАЮ» / даты — заменяет
+ *      содержимое ПЕРВОГО `<w:r>` на токены docxtemplater,
+ *      сохраняя `<w:pPr>` (alignment / spacing / indent) и
+ *      `<w:rPr>` (font / bold / size / color) этого первого run-а.
+ *      Все остальные `<w:r>` / `<w:proofErr>` / `SEQ`-поля внутри
+ *      этого `<w:p>` удаляются. НИ ОДИН исходный атрибут / property
+ *      не реконструируется.
+ *
+ *   2. В таблице (35 строк original):
+ *        R0  — заголовочная строка → оставлена как есть;
+ *        R1  — section-1 header     → текст заменён на `{section1.header}`;
+ *        R2  — первая admin-строка  → ячейки заменены на токены
+ *              `{code}` / `{name}` / `{count}`, и эта самая `<w:tr>`
+ *              обёрнута control-row'ами с тегами
+ *              `{#section1.rows}` ... `{/section1.rows}`;
+ *        R3..R14 — удалены (это были заполненные строки оригинала,
+ *              их заменит docxtemplater-loop);
+ *        R15 — section-2 header     → `{section2.header}`;
+ *        R16 — первая production-строка → токены + обёртка
+ *              `{#section2.rows}` ... `{/section2.rows}`;
+ *        R17..R33 — удалены;
+ *        R34 — итоговая строка      → `Итого: {grand_total} р/м`.
+ *
+ *   3. Все остальные части DOCX (styles.xml, fontTable.xml, theme,
+ *      settings.xml, _rels, [Content_Types].xml, media, sectPr, …)
+ *      берутся из оригинала БЕЗ изменений.
+ *
+ * НЕ rebuild XML manually. НЕ synthesize tables. НЕ flatten formatting.
  *
  * Запуск: node scripts/build-coding-template.js
  */
+
+"use strict";
 
 const fs = require("fs");
 const path = require("path");
 const PizZip = require("pizzip");
 
 const ROOT = path.resolve(__dirname, "..");
-const BASE_TEMPLATE = path.join(
+const ORIGINAL_DOCX = path.join(
   ROOT,
-  "public",
-  "templates",
-  "lighting-protocol.docx",
+  "3. Кодировка каз-рус kazfood.docx",
 );
 const OUT_TEMPLATE = path.join(
   ROOT,
@@ -33,7 +56,78 @@ const OUT_TEMPLATE = path.join(
   "coding-protocol.docx",
 );
 
-// -------- XML helpers (зеркально к build-siz-template.js) --------
+// ---------------------------------------------------------------------------
+// Surgical helpers — работают на строке UTF-8 XML, без DOM-парсера, без
+// regenerate-а параграфов. Каждая функция должна МЕНЯТЬ строго один
+// небольшой кусок XML и возвращать новую строку body XML.
+// ---------------------------------------------------------------------------
+
+/**
+ * Сканер top-level элементов внутри <w:body>: возвращает массив
+ * { tag, start, end, xml } для прямых детей.
+ */
+function scanTopLevel(s, tagNames) {
+  const set = new Set(tagNames);
+  const out = [];
+  let i = 0;
+  while (i < s.length) {
+    while (i < s.length && /\s/.test(s[i])) i++;
+    if (i >= s.length) break;
+    if (s[i] !== "<") {
+      i++;
+      continue;
+    }
+    const m = s.slice(i, i + 40).match(/^<([a-zA-Z0-9]+:[a-zA-Z0-9]+)\b/);
+    if (!m) {
+      const n = s.indexOf("<", i + 1);
+      i = n < 0 ? s.length : n;
+      continue;
+    }
+    const tag = m[1];
+    if (!set.has(tag)) {
+      // skip just this element (find its end, balanced)
+      const j = balancedEnd(s, i, tag);
+      i = j;
+      continue;
+    }
+    const j = balancedEnd(s, i, tag);
+    out.push({ tag, start: i, end: j, xml: s.slice(i, j) });
+    i = j;
+  }
+  return out;
+}
+
+function balancedEnd(s, start, tag) {
+  const open = `<${tag}`;
+  const close = `</${tag}>`;
+  let depth = 0;
+  let j = start;
+  while (j < s.length) {
+    if (
+      s.startsWith(open, j) &&
+      (s[j + open.length] === " " || s[j + open.length] === ">")
+    ) {
+      const gt = s.indexOf(">", j);
+      depth++;
+      if (s[gt - 1] === "/") {
+        depth--;
+        j = gt + 1;
+        if (depth === 0) return j;
+        continue;
+      }
+      j = gt + 1;
+      continue;
+    }
+    if (s.startsWith(close, j)) {
+      depth--;
+      j += close.length;
+      if (depth === 0) return j;
+      continue;
+    }
+    j++;
+  }
+  return s.length;
+}
 
 function xmlEscape(s) {
   return String(s)
@@ -42,210 +136,311 @@ function xmlEscape(s) {
     .replace(/>/g, "&gt;");
 }
 
-function p(text, opts = {}) {
-  const {
-    bold = false,
-    italic = false,
-    size = 24,
-    align = "left",
-    before = 0,
-    after = 0,
-  } = opts;
-  const rPr = `<w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/>${
-    bold ? "<w:b/>" : ""
-  }${italic ? "<w:i/>" : ""}<w:sz w:val="${size}"/><w:szCs w:val="${size}"/><w:lang w:val="ru-RU"/></w:rPr>`;
-  const pPr = `<w:pPr><w:spacing w:before="${before}" w:after="${after}" w:line="240" w:lineRule="auto"/><w:jc w:val="${align}"/></w:pPr>`;
-  return `<w:p>${pPr}<w:r>${rPr}<w:t xml:space="preserve">${xmlEscape(text)}</w:t></w:r></w:p>`;
+/**
+ * Surgical paragraph rewrite.
+ *
+ * Internally: keep <w:p ...attrs>, keep its <w:pPr>...</w:pPr>, keep the
+ * FIRST run's <w:rPr>...</w:rPr>, but rebuild only the run body so it
+ * carries a single <w:t xml:space="preserve">NEW</w:t>. Everything else
+ * inside the paragraph (subsequent runs, proofErr, fldChar/SEQ, bookmarks,
+ * hyperlinks) is dropped — they reference deleted text and would otherwise
+ * leave orphan field markers behind.
+ *
+ * Returns: rewritten <w:p>...</w:p> XML.
+ */
+function rewriteParagraphText(paragraphXml, newText) {
+  // strip outer <w:p ...> ... </w:p>
+  const openMatch = paragraphXml.match(/^<w:p\b([^>]*)>/);
+  if (!openMatch) {
+    throw new Error("rewriteParagraphText: not a <w:p> element");
+  }
+  const attrs = openMatch[1];
+  // pPr (optional)
+  let pPr = "";
+  const inner = paragraphXml.slice(openMatch[0].length, -"</w:p>".length);
+  const pPrMatch = inner.match(/^\s*(<w:pPr\b[^>]*\/>|<w:pPr\b[^>]*>[\s\S]*?<\/w:pPr>)/);
+  if (pPrMatch) {
+    pPr = pPrMatch[1];
+  }
+  const afterPPr = pPr ? inner.slice(pPrMatch[0].length) : inner;
+  // first <w:r>...</w:r>
+  const rOpenIdx = afterPPr.search(/<w:r\b/);
+  let rPr = "";
+  if (rOpenIdx !== -1) {
+    const rEnd = balancedEnd(afterPPr, rOpenIdx, "w:r");
+    const rXml = afterPPr.slice(rOpenIdx, rEnd);
+    const rInnerOpen = rXml.match(/^<w:r\b[^>]*>/);
+    if (rInnerOpen) {
+      const rInner = rXml.slice(rInnerOpen[0].length, -"</w:r>".length);
+      const rPrMatch = rInner.match(
+        /^\s*(<w:rPr\b[^>]*\/>|<w:rPr\b[^>]*>[\s\S]*?<\/w:rPr>)/,
+      );
+      if (rPrMatch) rPr = rPrMatch[1];
+    }
+  }
+  // Compose: take first <w:r ...> open tag attrs as well — but to be safe use bare <w:r>
+  const newRun =
+    `<w:r>${rPr}<w:t xml:space="preserve">${xmlEscape(newText)}</w:t></w:r>`;
+  return `<w:p${attrs}>${pPr}${newRun}</w:p>`;
 }
 
-function cellP(text, opts = {}) {
-  const {
-    bold = false,
-    italic = false,
-    size = 22,
-    align = "center",
-  } = opts;
-  const rPr = `<w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/>${
-    bold ? "<w:b/>" : ""
-  }${italic ? "<w:i/>" : ""}<w:sz w:val="${size}"/><w:szCs w:val="${size}"/><w:lang w:val="ru-RU"/></w:rPr>`;
-  const pPr = `<w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/><w:jc w:val="${align}"/></w:pPr>`;
-  return `<w:p>${pPr}<w:r>${rPr}<w:t xml:space="preserve">${xmlEscape(text)}</w:t></w:r></w:p>`;
+/**
+ * Apply rewriteParagraphText to ALL <w:p> children directly inside `rootXml`
+ * (depth 1). For each paragraph, replacementText(index) decides:
+ *   • return a string → rewrite paragraph text;
+ *   • return null      → leave paragraph untouched.
+ */
+function mapParagraphs(rootXml, decide) {
+  // rootXml is "<...><w:p>...</w:p>...<...>..."
+  // We need to find top-level <w:p> elements (not those nested inside <w:tbl>).
+  // Use a simple state machine that tracks depth of <w:tbl> only.
+  let out = "";
+  let i = 0;
+  let pIdx = 0;
+  let tblDepth = 0;
+  while (i < rootXml.length) {
+    if (rootXml.startsWith("<w:tbl", i) && (rootXml[i + 6] === " " || rootXml[i + 6] === ">")) {
+      // skip whole table verbatim
+      const j = balancedEnd(rootXml, i, "w:tbl");
+      out += rootXml.slice(i, j);
+      i = j;
+      continue;
+    }
+    if (
+      tblDepth === 0 &&
+      rootXml.startsWith("<w:p", i) &&
+      (rootXml[i + 4] === " " || rootXml[i + 4] === ">")
+    ) {
+      const j = balancedEnd(rootXml, i, "w:p");
+      const pXml = rootXml.slice(i, j);
+      const replacement = decide(pIdx, pXml);
+      out += replacement === null ? pXml : rewriteParagraphText(pXml, replacement);
+      pIdx++;
+      i = j;
+      continue;
+    }
+    out += rootXml[i];
+    i++;
+  }
+  return out;
 }
 
-function cellRaw(text) {
-  const rPr = `<w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/><w:sz w:val="2"/></w:rPr>`;
-  const pPr = `<w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>`;
-  return `<w:p>${pPr}<w:r>${rPr}<w:t xml:space="preserve">${xmlEscape(text)}</w:t></w:r></w:p>`;
+/**
+ * Find the single <w:tbl>...</w:tbl> in body and let mutator(tableXml)
+ * return new table XML.
+ */
+function mutateTable(bodyXml, mutator) {
+  const start = bodyXml.indexOf("<w:tbl>");
+  if (start === -1) throw new Error("no <w:tbl> in body");
+  const end = balancedEnd(bodyXml, start, "w:tbl");
+  return bodyXml.slice(0, start) + mutator(bodyXml.slice(start, end)) + bodyXml.slice(end);
 }
 
-function tc(content, opts = {}) {
-  const { width = 1000, gridSpan = 1, shd } = opts;
-  const tcW = `<w:tcW w:w="${width}" w:type="dxa"/>`;
-  const span = gridSpan > 1 ? `<w:gridSpan w:val="${gridSpan}"/>` : "";
-  const shading = shd
-    ? `<w:shd w:val="clear" w:color="auto" w:fill="${shd}"/>`
-    : "";
-  const borders = `<w:tcBorders><w:top w:val="single" w:sz="4" w:color="auto"/><w:left w:val="single" w:sz="4" w:color="auto"/><w:bottom w:val="single" w:sz="4" w:color="auto"/><w:right w:val="single" w:sz="4" w:color="auto"/></w:tcBorders>`;
-  const tcPr = `<w:tcPr>${tcW}${span}${borders}${shading}<w:vAlign w:val="center"/></w:tcPr>`;
-  return `<w:tc>${tcPr}${content}</w:tc>`;
+/**
+ * Mutator on a table: process each <w:tr> by index.
+ * decide(index, trXml) returns:
+ *   • string of XML (zero or more rows) to substitute,
+ *   • or null → keep row unchanged.
+ */
+function mapRows(tableXml, decide) {
+  // table is "<w:tbl><w:tblPr>...</w:tblPr><w:tblGrid>...</w:tblGrid> <w:tr>...</w:tr> ... </w:tbl>"
+  const openMatch = tableXml.match(/^<w:tbl\b[^>]*>/);
+  if (!openMatch) throw new Error("not a <w:tbl>");
+  const open = openMatch[0];
+  const inner = tableXml.slice(open.length, -"</w:tbl>".length);
+  // copy prologue until first <w:tr ...>
+  const firstTr = inner.search(/<w:tr\b/);
+  const prologue = firstTr === -1 ? inner : inner.slice(0, firstTr);
+  let body = firstTr === -1 ? "" : inner.slice(firstTr);
+  let out = open + prologue;
+  let rowIdx = 0;
+  while (body.length) {
+    if (!body.startsWith("<w:tr")) break;
+    const end = balancedEnd(body, 0, "w:tr");
+    const trXml = body.slice(0, end);
+    const sub = decide(rowIdx, trXml);
+    out += sub === null ? trXml : sub;
+    body = body.slice(end);
+    // also keep any whitespace between rows
+    const ws = body.match(/^\s+/);
+    if (ws) {
+      out += ws[0];
+      body = body.slice(ws[0].length);
+    }
+    rowIdx++;
+  }
+  // tail (anything after last row that isn't a row)
+  out += body;
+  out += "</w:tbl>";
+  return out;
 }
 
-function tr(...cells) {
-  return `<w:tr>${cells.join("")}</w:tr>`;
+/**
+ * Apply rewriteParagraphText to all <w:p> inside an arbitrary XML fragment
+ * (used for table rows where each cell has one paragraph).
+ * decide(globalParagraphIndex, paragraphXml) → string | null
+ */
+function mapParagraphsAnywhere(xml, decide) {
+  let out = "";
+  let i = 0;
+  let pIdx = 0;
+  while (i < xml.length) {
+    if (
+      xml.startsWith("<w:p", i) &&
+      (xml[i + 4] === " " || xml[i + 4] === ">")
+    ) {
+      const j = balancedEnd(xml, i, "w:p");
+      const pXml = xml.slice(i, j);
+      const repl = decide(pIdx, pXml);
+      out += repl === null ? pXml : rewriteParagraphText(pXml, repl);
+      pIdx++;
+      i = j;
+      continue;
+    }
+    out += xml[i];
+    i++;
+  }
+  return out;
 }
 
-// -------- Approval block --------
-
-function approvalBlock() {
-  return [
-    p("УТВЕРЖДАЮ", { bold: true, align: "right", size: 24 }),
-    p("{approval.position}", { bold: true, align: "right", size: 24 }),
-    p("{approval.organization}", { bold: true, align: "right", size: 24 }),
-    p("{approval.fullName}", { bold: true, align: "right", size: 24 }),
-    p(
-      "«{approval.date.day}» {approval.date.month} {approval.date.year} г.",
-      { bold: true, align: "right", size: 24, after: 240 },
-    ),
-  ].join("");
-}
-
-function titleBlock() {
-  return [
-    p("Жұмыс орнын кодтау", {
-      bold: true,
-      align: "center",
-      size: 28,
-      before: 200,
-    }),
-    p("Кодировка рабочих мест", {
-      bold: true,
-      align: "center",
-      size: 28,
-      after: 200,
-    }),
-  ].join("");
-}
-
-// -------- Main table (3 columns) --------
-
-const COLS = { code: 2200, name: 5800, count: 1500 };
-const COL_ORDER = [COLS.code, COLS.name, COLS.count];
-const TOTAL_WIDTH = COL_ORDER.reduce((a, b) => a + b, 0);
-
-function tableHeader() {
-  return tr(
-    tc(
-      cellP("Жұмыс орнының коды\nКод рабочего места", { bold: true, size: 20 }),
-      { width: COLS.code, shd: "DDEBF7" },
-    ),
-    tc(
-      cellP(
-        "Жұмыс орнының атауы, жабдық\nНаименование рабочего места, оборудование",
-        { bold: true, size: 20 },
-      ),
-      { width: COLS.name, shd: "DDEBF7" },
-    ),
-    tc(
-      cellP("Жұмыс орнынын саны\nКол-во рабочих мест", { bold: true, size: 20 }),
-      { width: COLS.count, shd: "DDEBF7" },
-    ),
-  );
-}
-
-function ctrlRow(tag) {
-  return tr(
-    tc(cellRaw(tag), { width: TOTAL_WIDTH, gridSpan: COL_ORDER.length }),
-  );
-}
-
-function sectionTitleRow() {
-  return tr(
-    tc(
-      cellP("{section_header}", { bold: true, size: 22, align: "left" }),
-      { width: TOTAL_WIDTH, gridSpan: COL_ORDER.length, shd: "F2F2F2" },
-    ),
-  );
-}
-
-function dataRow() {
-  return tr(
-    tc(cellP("{code}", { size: 20 }), { width: COLS.code }),
-    tc(cellP("{name}", { size: 20, align: "left" }), { width: COLS.name }),
-    tc(cellP("{count}", { size: 20 }), { width: COLS.count }),
-  );
-}
-
-function grandTotalRow() {
-  return tr(
-    tc(
-      cellP("Итого: {grand_total} р/м", {
-        bold: true,
-        size: 22,
-        align: "right",
-      }),
-      { width: TOTAL_WIDTH, gridSpan: COL_ORDER.length, shd: "DDEBF7" },
-    ),
-  );
-}
-
-function codingTable() {
-  const tblPr = `<w:tblPr><w:tblW w:w="${TOTAL_WIDTH}" w:type="dxa"/><w:jc w:val="center"/><w:tblLayout w:type="fixed"/><w:tblBorders><w:top w:val="single" w:sz="4" w:color="auto"/><w:left w:val="single" w:sz="4" w:color="auto"/><w:bottom w:val="single" w:sz="4" w:color="auto"/><w:right w:val="single" w:sz="4" w:color="auto"/><w:insideH w:val="single" w:sz="4" w:color="auto"/><w:insideV w:val="single" w:sz="4" w:color="auto"/></w:tblBorders></w:tblPr>`;
-  const grid = `<w:tblGrid>${COL_ORDER.map(
-    (w) => `<w:gridCol w:w="${w}"/>`,
-  ).join("")}</w:tblGrid>`;
-  const rows = [
-    tableHeader(),
-    ctrlRow("{#sections}"),
-    sectionTitleRow(),
-    ctrlRow("{#rows}"),
-    dataRow(),
-    ctrlRow("{/rows}"),
-    ctrlRow("{/sections}"),
-    grandTotalRow(),
-  ].join("");
-  return `<w:tbl>${tblPr}${grid}${rows}</w:tbl>`;
-}
-
-// -------- Compose document.xml --------
-
-function buildDocumentXml() {
-  const sectPr = `<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="850" w:bottom="1134" w:left="1134" w:header="708" w:footer="708" w:gutter="0"/><w:cols w:space="708"/><w:docGrid w:linePitch="360"/></w:sectPr>`;
-  // OOXML: <w:tbl> не может быть последним прямым потомком <w:body>;
-  // Word трактует это как «обнаружено содержимое, которое не удалось
-  // прочитать». Добавляем минимальный завершающий <w:p/>, как это
-  // делает любой нормальный экспорт Word (см. безопасные шаблоны
-  // safety / siz / summary — у них таблица всегда сопровождается
-  // блоком подписей или пустым параграфом).
-  const trailingP = `<w:p><w:pPr><w:spacing w:after="0"/></w:pPr></w:p>`;
-  const body = `<w:body>${approvalBlock()}${titleBlock()}${codingTable()}${trailingP}${sectPr}</w:body>`;
-  const docOpen = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">`;
-  return `${docOpen}${body}</w:document>`;
-}
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
 
 function build() {
-  const baseBuf = fs.readFileSync(BASE_TEMPLATE);
-  const zip = new PizZip(baseBuf);
+  if (!fs.existsSync(ORIGINAL_DOCX)) {
+    throw new Error(
+      `Original reference DOCX not found: ${ORIGINAL_DOCX}\n` +
+        `Это обязательный source-of-truth для шаблона кодировки.`,
+    );
+  }
 
-  const newRels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/><Relationship Id="rId6" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/webSettings" Target="webSettings.xml"/><Relationship Id="rId7" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/><Relationship Id="rId8" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes" Target="endnotes.xml"/><Relationship Id="rId12" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable" Target="fontTable.xml"/><Relationship Id="rId13" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/><Relationship Id="rId4" Type="http://schemas.microsoft.com/office/2007/relationships/stylesWithEffects" Target="stylesWithEffects.xml"/><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml" Target="../customXml/item1.xml"/></Relationships>`;
+  const origBuf = fs.readFileSync(ORIGINAL_DOCX);
+  const zip = new PizZip(origBuf);
 
-  zip.file("word/document.xml", buildDocumentXml());
-  zip.file("word/_rels/document.xml.rels", newRels);
+  const docXmlEntry = zip.file("word/document.xml");
+  if (!docXmlEntry) {
+    throw new Error("Original DOCX missing word/document.xml");
+  }
+  const origXml = docXmlEntry.asText();
 
-  ["word/footer1.xml", "word/media/image1.png", "word/media/image2.png", "word/document.xml.new"].forEach(
-    (q) => {
-      if (zip.file(q)) zip.remove(q);
-    },
+  // Locate <w:body>
+  const bodyOpenMatch = origXml.match(/<w:body\b[^>]*>/);
+  if (!bodyOpenMatch) throw new Error("no <w:body> in document.xml");
+  const bodyOpenIdx = bodyOpenMatch.index;
+  const bodyOpenLen = bodyOpenMatch[0].length;
+  const bodyCloseIdx = origXml.lastIndexOf("</w:body>");
+  const bodyXml = origXml.slice(bodyOpenIdx + bodyOpenLen, bodyCloseIdx);
+
+  // --- (A) Replace text of header paragraphs and main title.
+  // Original block layout (verified by inspection):
+  //   P0  "УТВЕРЖДАЮ"               — keep as-is
+  //   P1  "Директор "                → {approval.position}
+  //   P2  "ТОО «KazEcoFood»"          → {approval.organization}
+  //   P3  "Балян  Л.Н."               → {approval.fullName}
+  //   P4  "«20» апреля 2026 г."       → «{approval.date.day}» {approval.date.month} {approval.date.year} г.
+  //   P5  ""                          — keep (spacer)
+  //   P6  ""                          — keep (spacer)
+  //   P7  "Жұмыс орнын кодтау"       — keep
+  //   P8  "Кодировка рабочих мест"   — keep
+  //   then <w:tbl>
+  //   P9  ""                          — keep (trailing)
+  const headerMap = {
+    0: null, // УТВЕРЖДАЮ
+    1: "{approval.position}",
+    2: "{approval.organization}",
+    3: "{approval.fullName}",
+    4: "«{approval.date.day}» {approval.date.month} {approval.date.year} г.",
+  };
+  let newBody = mapParagraphs(bodyXml, (idx) =>
+    Object.prototype.hasOwnProperty.call(headerMap, idx)
+      ? headerMap[idx]
+      : null,
   );
 
-  const ct = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/customXml/itemProps1.xml" ContentType="application/vnd.openxmlformats-officedocument.customXmlProperties+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/word/stylesWithEffects.xml" ContentType="application/vnd.ms-word.stylesWithEffects+xml"/><Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/><Override PartName="/word/webSettings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.webSettings+xml"/><Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/><Override PartName="/word/endnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml"/><Override PartName="/word/fontTable.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml"/><Override PartName="/word/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/></Types>`;
-  zip.file("[Content_Types].xml", ct);
+  // --- (B) Mutate the single table.
+  newBody = mutateTable(newBody, (tableXml) => {
+    return mapRows(tableXml, (rowIdx, trXml) => {
+      // R0 header row — leave intact.
+      if (rowIdx === 0) return null;
 
-  const out = zip.generate({ type: "nodebuffer" });
+      // R1: section 1 header row. Single merged cell, replace its first
+      // paragraph's text with {section1_header}.
+      if (rowIdx === 1) {
+        const updated = mapParagraphsAnywhere(trXml, (pIdx) =>
+          pIdx === 0 ? "{section1_header}" : null,
+        );
+        return updated;
+      }
+
+      // R2: first admin workplace row (template). Inline the loop tags
+      // INSIDE the row's outer cells so docxtemplater detects a single-row
+      // repeat. Pattern mirrors safety-protocol.docx (see
+      // {#adminMeasurements}…{/adminMeasurements} там).
+      if (rowIdx === 2) {
+        const tokens = [
+          "{#section1_rows}{code}",
+          "{name}",
+          "{count}{/section1_rows}",
+        ];
+        return mapParagraphsAnywhere(trXml, (pIdx) =>
+          pIdx < tokens.length ? tokens[pIdx] : null,
+        );
+      }
+
+      // R3..R14: drop (the loop replicates R2).
+      if (rowIdx >= 3 && rowIdx <= 14) return "";
+
+      // R15: section 2 header row.
+      if (rowIdx === 15) {
+        const updated = mapParagraphsAnywhere(trXml, (pIdx) =>
+          pIdx === 0 ? "{section2_header}" : null,
+        );
+        return updated;
+      }
+
+      // R16: first production workplace row (template).
+      if (rowIdx === 16) {
+        const tokens = [
+          "{#section2_rows}{code}",
+          "{name}",
+          "{count}{/section2_rows}",
+        ];
+        return mapParagraphsAnywhere(trXml, (pIdx) =>
+          pIdx < tokens.length ? tokens[pIdx] : null,
+        );
+      }
+
+      // R17..R33: drop.
+      if (rowIdx >= 17 && rowIdx <= 33) return "";
+
+      // R34: total row "Итого: 55 р/м" → "Итого: {grand_total} р/м".
+      if (rowIdx === 34) {
+        const updated = mapParagraphsAnywhere(trXml, (pIdx) =>
+          pIdx === 0 ? "Итого: {grand_total} р/м" : null,
+        );
+        return updated;
+      }
+
+      return null;
+    });
+  });
+
+  const newXml =
+    origXml.slice(0, bodyOpenIdx + bodyOpenLen) +
+    newBody +
+    origXml.slice(bodyCloseIdx);
+
+  zip.file("word/document.xml", newXml);
+
+  const out = zip.generate({
+    type: "nodebuffer",
+    compression: "DEFLATE",
+  });
   fs.writeFileSync(OUT_TEMPLATE, out);
-  console.log(`Wrote ${OUT_TEMPLATE} (${out.length} bytes)`);
+  console.log(
+    `Wrote ${OUT_TEMPLATE} (${out.length} bytes) from original (${origBuf.length} bytes)`,
+  );
 }
 
 build();

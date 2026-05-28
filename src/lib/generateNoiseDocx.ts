@@ -1,7 +1,6 @@
 import type { NoiseMeasurement, NoiseProtocol } from "@/types/noise";
 import { renderDocument, TemplateRenderError } from "./docs/engine";
 import { flatten } from "./docs/flatten";
-import { flattenPlacesMeasurements } from "./docs/rows";
 
 const TEMPLATE_URL = "/templates/noise-protocol.docx";
 
@@ -16,21 +15,34 @@ export async function generateNoiseDocx(data: NoiseProtocol): Promise<void> {
   });
 }
 
+/**
+ * The template uses TWO separate loops:
+ *   {#adminMeasurements}…{/adminMeasurements}  — populates the
+ *     "1. Административно – управленческий персонал" sub-table.
+ *   {#productionMeasurements}…{/productionMeasurements} — populates the
+ *     "2. Производственный персонал" sub-table.
+ *
+ * `places[0]` provides admin measurements; `places[1]` provides production
+ * measurements. Additional places (if any) are appended to production for
+ * forward-compatibility.
+ */
 export function buildTemplateContext(
   data: NoiseProtocol,
 ): Record<string, unknown> {
-  // Flatten places + measurements into a single ordered list. The first
-  // measurement of each place carries `showPlace: true` along with the
-  // place number/name; subsequent measurements within the same place have
-  // `showPlace: false`.
-  const measurements = flattenPlacesMeasurements(
-    data.places,
+  const adminPlace = data.places[0];
+  const productionPlaces = data.places.slice(1);
+
+  const adminMeasurements = (adminPlace?.measurements ?? []).map(
     flattenMeasurement,
+  );
+  const productionMeasurements = productionPlaces.flatMap((p) =>
+    p.measurements.map(flattenMeasurement),
   );
 
   return {
     ...flatten(data, { skipKeys: ["places"] }),
-    measurements,
+    adminMeasurements,
+    productionMeasurements,
   };
 }
 

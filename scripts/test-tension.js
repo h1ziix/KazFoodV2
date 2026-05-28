@@ -103,6 +103,18 @@ function expandIndicator(prefix, indicator) {
 }
 
 function mapWorkplace(w) {
+  const allIndicators = [
+    w.p1_1_content, w.p1_2_signals, w.p1_3_distribution, w.p1_4_character,
+    w.p2_1_duration, w.p2_2_density, w.p2_3_objects, w.p2_4_sizeLong,
+    w.p2_5_optical, w.p2_6_videoTerminal, w.p2_7_voiceLoad, w.p2_8_speakLoad,
+    w.p3_1_responsibility, w.p3_2_risk, w.p3_3_othersRisk,
+    w.p4_1_elements, w.p4_2_duration, w.p4_3_active, w.p4_4_passive,
+    w.p5_1_duration, w.p5_2_shift, w.p5_3_breaks,
+  ];
+  const counts = { "1": 0, "2": 0, "3.1": 0, "3.2": 0 };
+  for (const i of allIndicators) if (i && counts[i.class] !== undefined) counts[i.class]++;
+  const fmt = (n) => (n > 0 ? String(n) : "");
+
   return {
     rowNumber: w.rowNumber,
     code: w.code,
@@ -110,6 +122,11 @@ function mapWorkplace(w) {
     measurementPlace: w.measurementPlace,
     workDescription: w.workDescription,
     finalAssessment: w.finalAssessment,
+
+    count_c1: fmt(counts["1"]),
+    count_c2: fmt(counts["2"]),
+    count_c31: fmt(counts["3.1"]),
+    count_c32: fmt(counts["3.2"]),
 
     ...expandIndicator("p1_1", w.p1_1_content),
     ...expandIndicator("p1_2", w.p1_2_signals),

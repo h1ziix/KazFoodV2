@@ -30,10 +30,16 @@ export function buildTemplateContext(
 function flattenMeasurement(
   measurement: EmpMeasurement,
 ): Record<string, unknown> {
+  // The template uses fixed range labels ("Диапазон 1" / "Диапазон 2")
+  // matching the reference DOCX, not the frequency text from the
+  // source data. The original measurement.range{1,2}.name values are
+  // preserved on the object for any downstream consumer that still
+  // needs them, but the DOCX template no longer renders them.
   return {
     rowNumber: measurement.rowNumber,
     pointNumber: measurement.pointNumber,
     place: measurement.place,
+    range1Label: "Диапазон 1",
     range1Name: measurement.range1.name,
     range1Distance: measurement.range1.distance,
     range1Height: measurement.range1.height,
@@ -42,6 +48,7 @@ function flattenMeasurement(
     range1ElectricAllowed: measurement.range1.electricAllowed,
     range1MagneticMeasured: measurement.range1.magneticMeasured,
     range1MagneticAllowed: measurement.range1.magneticAllowed,
+    range2Label: "Диапазон 2",
     range2Name: measurement.range2.name,
     range2Distance: measurement.range2.distance,
     range2Height: measurement.range2.height,

@@ -1,12 +1,22 @@
 /**
- * Сборка DOCX-шаблона для протокола "Тяжесть трудового процесса".
+ * Build public/templates/heaviness-protocol.docx by performing XML surgery
+ * on the original reference DOCX ("10. Тяжесть каз-рус ГОТОВО kAZFOOD.docx").
  *
- * Берёт за основу public/templates/lighting-protocol.docx (для styles/theme/
- * settings/numbering и т.п.), заменяет только word/document.xml на собственный
- * с docxtemplater-плейсхолдерами, и сохраняет результат как
- * public/templates/heaviness-protocol.docx.
+ * Strategy ("template-by-injection"):
+ *   1. Take the reference DOCX as the layout truth.
+ *   2. Trim document.xml down to one workplace block + the section properties.
+ *   3. Wrap the kept block with docxtemplater loop tags
+ *        {#workplaces} ... {/workplaces}
+ *   4. INSIDE the block, replace the textual content of specific
+ *      <w:t> nodes / table cells with docxtemplater placeholders,
+ *      WITHOUT touching <w:pPr>, <w:tblPr>, <w:tcPr>, surrounding
+ *      <w:r> structure, numbering refs, tab stops, indents, etc.
  *
- * Запуск: node scripts/build-heaviness-template.js
+ * This preserves the original Word formatting (hanging indents, line
+ * spacing, italic/bold runs, justification, tab stops, font metrics, the
+ * letterhead table, page breaks, etc.) — only the *values* are templated.
+ *
+ * Run: node scripts/build-heaviness-template.js
  */
 
 const fs = require("fs");
@@ -14,11 +24,9 @@ const path = require("path");
 const PizZip = require("pizzip");
 
 const ROOT = path.resolve(__dirname, "..");
-const BASE_TEMPLATE = path.join(
+const REF_DOCX = path.join(
   ROOT,
-  "public",
-  "templates",
-  "lighting-protocol.docx",
+  "10. Тяжесть каз-рус ГОТОВО kAZFOOD.docx",
 );
 const OUT_TEMPLATE = path.join(
   ROOT,
@@ -27,286 +35,889 @@ const OUT_TEMPLATE = path.join(
   "heaviness-protocol.docx",
 );
 
-// -------- XML helpers --------
+// -------------------------------------------------------------------------
+// Generic XML helpers
+// -------------------------------------------------------------------------
 
-function xmlEscape(s) {
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+/**
+ * Enumerate top-level child elements of an XML region, returning their
+ * tag name and byte range (start..end inclusive of '<' and '>').
+ */
+function findTopLevelChildren(xml, from, to) {
+  const out = [];
+  let i = from;
+  while (i < to) {
+    while (i < to && /\s/.test(xml[i])) i++;
+    if (i >= to) break;
+    if (xml[i] !== "<") {
+      i++;
+      continue;
+    }
+    const tagStart = i;
+    let j = i + 1;
+    while (j < to && !/[\s>\/]/.test(xml[j])) j++;
+    const tagName = xml.substring(i + 1, j);
+    while (j < to && xml[j] !== ">") j++;
+    const isSelfClose = xml[j - 1] === "/";
+    j++;
+    if (isSelfClose) {
+      out.push({ tag: tagName, start: tagStart, end: j });
+      i = j;
+      continue;
+    }
+    const closeTag = `</${tagName}>`;
+    const openTag = `<${tagName} `;
+    const openTagAlt = `<${tagName}>`;
+    let depth = 1;
+    let k = j;
+    while (k < to && depth > 0) {
+      const nextClose = xml.indexOf(closeTag, k);
+      if (nextClose < 0) {
+        depth = 0;
+        k = to;
+        break;
+      }
+      let scan = k;
+      while (true) {
+        const a = xml.indexOf(openTag, scan);
+        const b = xml.indexOf(openTagAlt, scan);
+        let next;
+        if (a < 0 && b < 0) next = -1;
+        else if (a < 0) next = b;
+        else if (b < 0) next = a;
+        else next = Math.min(a, b);
+        if (next < 0 || next > nextClose) break;
+        depth++;
+        scan = next + openTag.length;
+      }
+      depth--;
+      k = nextClose + closeTag.length;
+    }
+    out.push({ tag: tagName, start: tagStart, end: k });
+    i = k;
+  }
+  return out;
 }
 
-// w:p with optional rPr / pPr
-function p(text, opts = {}) {
-  const { bold = false, italic = false, size = 22, align = "left", before = 0, after = 0 } = opts;
-  const rPr = `<w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/>${
-    bold ? "<w:b/>" : ""
-  }${italic ? "<w:i/>" : ""}<w:sz w:val="${size}"/><w:szCs w:val="${size}"/><w:lang w:val="ru-RU"/></w:rPr>`;
-  const pPr = `<w:pPr><w:spacing w:before="${before}" w:after="${after}" w:line="240" w:lineRule="auto"/><w:jc w:val="${align}"/></w:pPr>`;
-  return `<w:p>${pPr}<w:r>${rPr}<w:t xml:space="preserve">${xmlEscape(text)}</w:t></w:r></w:p>`;
+/**
+ * Find all <w:tr>...</w:tr> ranges inside a table XML string (flat scan;
+ * does not handle nested tables — none in our reference).
+ */
+function findRows(tableXml) {
+  const out = [];
+  for (const m of tableXml.matchAll(/<w:tr[ >]/g)) {
+    const s = m.index;
+    const e = tableXml.indexOf("</w:tr>", s);
+    if (e < 0) continue;
+    out.push({ start: s, end: e + "</w:tr>".length });
+  }
+  return out;
 }
 
-// Empty paragraph for cycle markers like {#workplaces}
-function ctrl(tag) {
-  // place in a paragraph so docxtemplater sees full {#tag}
-  return `<w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/><w:sz w:val="2"/></w:rPr><w:t xml:space="preserve">${xmlEscape(tag)}</w:t></w:r></w:p>`;
+/**
+ * Find all top-level <w:tc>...</w:tc> ranges inside a row XML string.
+ */
+function findCells(rowXml) {
+  const out = [];
+  let i = 0;
+  while (true) {
+    const s = rowXml.indexOf("<w:tc>", i);
+    if (s < 0) {
+      // also try with attrs (rare for <w:tc>)
+      const s2 = rowXml.indexOf("<w:tc ", i);
+      if (s2 < 0) break;
+      // not expected; handle anyway
+      const e2 = closeTagEnd(rowXml, s2, "w:tc");
+      out.push({ start: s2, end: e2 });
+      i = e2;
+      continue;
+    }
+    const e = closeTagEnd(rowXml, s, "w:tc");
+    out.push({ start: s, end: e });
+    i = e;
+  }
+  return out;
 }
 
-// Table cell
-function tc(content, opts = {}) {
-  const { width = 1000, gridSpan = 1, vMerge, shd } = opts;
-  const tcW = `<w:tcW w:w="${width}" w:type="dxa"/>`;
-  const span = gridSpan > 1 ? `<w:gridSpan w:val="${gridSpan}"/>` : "";
-  const merge = vMerge
-    ? `<w:vMerge${vMerge === "restart" ? ' w:val="restart"' : ""}/>`
-    : "";
-  const shading = shd ? `<w:shd w:val="clear" w:color="auto" w:fill="${shd}"/>` : "";
-  const borders = `<w:tcBorders><w:top w:val="single" w:sz="4" w:color="auto"/><w:left w:val="single" w:sz="4" w:color="auto"/><w:bottom w:val="single" w:sz="4" w:color="auto"/><w:right w:val="single" w:sz="4" w:color="auto"/></w:tcBorders>`;
-  const tcPr = `<w:tcPr>${tcW}${span}${merge}${borders}${shading}<w:vAlign w:val="center"/></w:tcPr>`;
-  return `<w:tc>${tcPr}${content}</w:tc>`;
+function closeTagEnd(xml, openStart, tagName) {
+  const openTag1 = `<${tagName}>`;
+  const openTag2 = `<${tagName} `;
+  const closeTag = `</${tagName}>`;
+  let depth = 1;
+  let i = openStart + openTag1.length; // both openTag1/openTag2 length identical-ish; doesn't matter, we just scan
+  // recover: skip past initial open tag header
+  const gt = xml.indexOf(">", openStart);
+  i = gt + 1;
+  while (depth > 0) {
+    const nextClose = xml.indexOf(closeTag, i);
+    if (nextClose < 0) throw new Error(`Unbalanced ${tagName}`);
+    let scan = i;
+    while (true) {
+      const a = xml.indexOf(openTag1, scan);
+      const b = xml.indexOf(openTag2, scan);
+      let next;
+      if (a < 0 && b < 0) next = -1;
+      else if (a < 0) next = b;
+      else if (b < 0) next = a;
+      else next = Math.min(a, b);
+      if (next < 0 || next > nextClose) break;
+      depth++;
+      scan = next + openTag1.length;
+    }
+    depth--;
+    i = nextClose + closeTag.length;
+  }
+  return i;
 }
 
-function cellP(text, opts = {}) {
-  const { bold = false, italic = false, size = 18, align = "center" } = opts;
-  const rPr = `<w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/>${
-    bold ? "<w:b/>" : ""
-  }${italic ? "<w:i/>" : ""}<w:sz w:val="${size}"/><w:szCs w:val="${size}"/><w:lang w:val="ru-RU"/></w:rPr>`;
-  const pPr = `<w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/><w:jc w:val="${align}"/></w:pPr>`;
-  return `<w:p>${pPr}<w:r>${rPr}<w:t xml:space="preserve">${xmlEscape(text)}</w:t></w:r></w:p>`;
+// -------------------------------------------------------------------------
+// Cell content transformation
+// -------------------------------------------------------------------------
+
+/**
+ * Replace the text inside a <w:tc> cell with a single docxtemplater
+ * placeholder, preserving the cell's <w:tcPr> and every paragraph's
+ * <w:pPr>.  All existing <w:r> runs (including complex Word fields)
+ * inside every <w:p> of the cell are removed; one new <w:r> carrying
+ * the placeholder is inserted at the start of the FIRST <w:p>.
+ *
+ * The run's <w:rPr> is cloned from the original first run's <w:rPr>
+ * (or from the paragraph's <w:pPr>/<w:rPr> if no run exists), so the
+ * placeholder text renders in the same font / size / bold / italic
+ * as the value it replaces.
+ */
+function replaceCellTextWithPlaceholder(cellXml, placeholder) {
+  // Split cell into <w:tcPr>...</w:tcPr> + paragraphs.
+  const tcOpenEnd = cellXml.indexOf(">") + 1; // after "<w:tc>"
+  const tcCloseStart = cellXml.lastIndexOf("</w:tc>");
+  const inner = cellXml.substring(tcOpenEnd, tcCloseStart);
+
+  // Find <w:tcPr>
+  let tcPr = "";
+  let paragraphsRegion = inner;
+  const tcPrMatch = inner.match(/^\s*<w:tcPr>[\s\S]*?<\/w:tcPr>/);
+  if (tcPrMatch) {
+    tcPr = tcPrMatch[0];
+    paragraphsRegion = inner.substring(tcPrMatch[0].length);
+  }
+
+  // Locate every <w:p>...</w:p> in paragraphsRegion (top level only).
+  const paragraphs = [];
+  let i = 0;
+  while (i < paragraphsRegion.length) {
+    const pStart = paragraphsRegion.indexOf("<w:p", i);
+    if (pStart < 0) break;
+    const headerEnd = paragraphsRegion.indexOf(">", pStart) + 1;
+    const isSelfClose = paragraphsRegion[headerEnd - 2] === "/";
+    if (isSelfClose) {
+      paragraphs.push({
+        start: pStart,
+        end: headerEnd,
+        text: paragraphsRegion.substring(pStart, headerEnd),
+        selfClose: true,
+      });
+      i = headerEnd;
+      continue;
+    }
+    const pEnd = paragraphsRegion.indexOf("</w:p>", headerEnd) + "</w:p>".length;
+    paragraphs.push({
+      start: pStart,
+      end: pEnd,
+      text: paragraphsRegion.substring(pStart, pEnd),
+      selfClose: false,
+    });
+    i = pEnd;
+  }
+
+  if (paragraphs.length === 0) {
+    // No paragraphs — synthesize one
+    return (
+      "<w:tc>" +
+      tcPr +
+      `<w:p><w:r><w:t xml:space="preserve">${placeholder}</w:t></w:r></w:p>` +
+      "</w:tc>"
+    );
+  }
+
+  // For each paragraph, strip all <w:r> ... </w:r> (including any fldChar
+  // and instrText) but keep <w:pPr>.  Then for the first paragraph, insert
+  // a single <w:r> with the placeholder right after <w:pPr> (or at start
+  // if no <w:pPr>).  Use rPr cloned from the first existing run or from
+  // <w:pPr>/<w:rPr>.
+  const transformed = paragraphs.map((p, idx) => {
+    if (p.selfClose) return p.text;
+    const inside = p.text.substring(
+      p.text.indexOf(">") + 1,
+      p.text.length - "</w:p>".length,
+    );
+    // Extract <w:pPr>...</w:pPr> if present
+    let pPr = "";
+    let body = inside;
+    const pPrMatch = inside.match(/^\s*<w:pPr>[\s\S]*?<\/w:pPr>/);
+    if (pPrMatch) {
+      pPr = pPrMatch[0];
+      body = inside.substring(pPrMatch[0].length);
+    }
+    // Capture first run's rPr (if any)
+    let runRPr = "";
+    const firstRunMatch = body.match(/<w:r(?:\s[^>]*)?>([\s\S]*?)<\/w:r>/);
+    if (firstRunMatch) {
+      const runInner = firstRunMatch[1];
+      const rPrMatch = runInner.match(/^\s*<w:rPr>[\s\S]*?<\/w:rPr>/);
+      if (rPrMatch) runRPr = rPrMatch[0];
+    }
+    // Fallback: take rPr from pPr
+    if (!runRPr && pPr) {
+      const pPrRPrMatch = pPr.match(/<w:rPr>[\s\S]*?<\/w:rPr>/);
+      if (pPrRPrMatch) runRPr = pPrRPrMatch[0];
+    }
+
+    // Reconstruct paragraph header (open tag)
+    const openTagEnd = p.text.indexOf(">") + 1;
+    const openTag = p.text.substring(0, openTagEnd);
+
+    if (idx === 0) {
+      const placeholderRun = `<w:r>${runRPr}<w:t xml:space="preserve">${placeholder}</w:t></w:r>`;
+      return openTag + pPr + placeholderRun + "</w:p>";
+    } else {
+      // Subsequent paragraphs of the same cell are kept structurally
+      // empty (preserve their pPr — e.g. spacing — but no runs).
+      return openTag + pPr + "</w:p>";
+    }
+  });
+
+  return "<w:tc>" + tcPr + transformed.join("") + "</w:tc>";
 }
 
-// Table row
-function tr(...cells) {
-  return `<w:tr>${cells.join("")}</w:tr>`;
-}
+/**
+ * In a single <w:p> paragraph, replace the entire run sequence with a
+ * single run carrying the given placeholder.  Used for header
+ * paragraphs (customer line, date line, etc.) whose <w:t>s are split
+ * across many runs (some inside MERGEFIELD complex fields).
+ *
+ * Preserves <w:pPr> (numbering refs, tab stops, indent, justification,
+ * spacing) AND optionally a leading "label" portion of runs that
+ * matches `keepLeadingMatch` regex — those runs (the bilingual label
+ * before the value) stay intact, and only the trailing portion (the
+ * value) is replaced.
+ */
+function replaceParagraphValue(paragraphXml, placeholder, opts = {}) {
+  const { keepLeadingUntilText = null, valueRPr = null } = opts;
 
-// -------- Header lab block --------
-
-function labHeader() {
-  return [
-    p("«Центр экспертной оценки условий труда» ЖШС", { bold: true, align: "center", size: 22 }),
-    p("Cынақ зертханасы", { bold: true, align: "center", size: 22 }),
-    p("Алматы қ., Турксиб ауданы, Остроумов көш., 50А үй", { align: "center", size: 20 }),
-    p("Телефон/факс: +7 777 231 70 74, +7 700 992 05 59", { align: "center", size: 20 }),
-    p("Е-mail: info@hse-profi.kz", { bold: true, align: "center", size: 20 }),
-    p("KZ.T.02.E1210 Аккредиттеу аттестаты", { bold: true, align: "center", size: 20 }),
-    p("2022 ж. 25 шілде 2022 ж.", { bold: true, align: "center", size: 20 }),
-    p("25 шілде 2027 дейін", { bold: true, align: "center", size: 20 }),
-  ].join("");
-}
-
-function protocolTitle() {
-  return [
-    p("ПРОТОКОЛ № {protocol.number}", { bold: true, align: "center", size: 26, before: 200 }),
-    p("еңбек өрдісінің ауырлық көрсеткіштері бойынша еңбек жағдайын бағалау", {
-      bold: true,
-      italic: true,
-      align: "center",
-      size: 22,
-    }),
-    p("оценки условий труда по показателям тяжести трудового процесса", {
-      bold: true,
-      align: "center",
-      size: 22,
-    }),
-  ].join("");
-}
-
-function customerBlock() {
-  return [
-    p("Тапсырыс берушінің атауы және мекен-жайы (наименование и адрес заказчика): {customer.name}, {customer.address}", { bold: true, size: 22 }),
-    p("Өлшеу жүргізу орны (место проведения оценки): {measurementPlace}", { bold: true, size: 22 }),
-    p("Тегі, аты, әкесінің аты (лауазымы) (Фамилия, имя, отчество (должность): {position}", { bold: true, size: 22 }),
-    p("Өлшем жүргізу күні (дата проведения оценки): «{measurementDate.day}» {measurementDate.month} {measurementDate.year} г.", { bold: true, size: 22 }),
-    p("Қысқаша жұмыс істеу нұсқалары (краткое описание выполняемой работы): {workDescription}", { size: 22 }),
-    p("Жұмыс жағдайларын жұмыс барысының ауырлығының көрсеткіштері бойынша бағалау нәтижелері (результаты оценки условий труда по показателям тяжести трудового процесса):", { bold: true, size: 22 }),
-  ].join("");
-}
-
-// -------- The big indicators table --------
-
-// Column widths (twips). Total ~10000.
-const W = {
-  code: 900,        // код рабочего места
-  position: 1500,   // профессия
-  indicator: 4200,  // показатель
-  value: 1400,      // факт. значение
-  cls: 500,         // каждая из 4 колонок класса (4*500=2000)
-};
-
-function tableHeader() {
-  // Header row 1 — заголовки колонок (со слитыми ячейками классов)
-  const row1 = tr(
-    tc(cellP("Жұмыс орнының коды (код рабочего места)", { bold: true, size: 16 }), { width: W.code, vMerge: "restart" }),
-    tc(cellP("Кәсіптер мен лауазымдардың атауы (наименование профессий, должностей)", { bold: true, size: 16 }), { width: W.position, vMerge: "restart" }),
-    tc(cellP("Жұмыс барысының ауырлығының көрсеткіштері (Показатели тяжести трудового процесса)", { bold: true, size: 16 }), { width: W.indicator, vMerge: "restart" }),
-    tc(cellP("Нақты белгілер / Фактические значения", { bold: true, size: 16 }), { width: W.value, vMerge: "restart" }),
-    tc(cellP("Жұмыс жағдайларының классы (классы условий труда)", { bold: true, size: 16 }), { width: W.cls * 4, gridSpan: 4 }),
+  // Split into open tag, inner, close tag
+  const openTagEnd = paragraphXml.indexOf(">") + 1;
+  const openTag = paragraphXml.substring(0, openTagEnd);
+  const close = "</w:p>";
+  const inner = paragraphXml.substring(
+    openTagEnd,
+    paragraphXml.length - close.length,
   );
-  const row2 = tr(
-    tc(cellP("", {}), { width: W.code, vMerge: "continue" }),
-    tc(cellP("", {}), { width: W.position, vMerge: "continue" }),
-    tc(cellP("", {}), { width: W.indicator, vMerge: "continue" }),
-    tc(cellP("", {}), { width: W.value, vMerge: "continue" }),
-    tc(cellP("1 қолайлы / оптимальный", { bold: true, size: 14 }), { width: W.cls }),
-    tc(cellP("2 рұқсат етілген / допустимый", { bold: true, size: 14 }), { width: W.cls }),
-    tc(cellP("3.1 зиянды / вредный", { bold: true, size: 14 }), { width: W.cls }),
-    tc(cellP("3.2 зиянды / вредный", { bold: true, size: 14 }), { width: W.cls }),
+
+  // Extract <w:pPr>...</w:pPr>
+  let pPr = "";
+  let body = inner;
+  const pPrMatch = inner.match(/^\s*<w:pPr>[\s\S]*?<\/w:pPr>/);
+  if (pPrMatch) {
+    pPr = pPrMatch[0];
+    body = inner.substring(pPrMatch[0].length);
+  }
+
+  // Enumerate runs (we treat <w:r> and <w:bookmarkStart/End> as siblings;
+  // we keep bookmarks intact at the end.)
+  const tokens = tokenizeRuns(body);
+
+  // Find split point: keep leading runs whose visible text appears before
+  // the regex match in keepLeadingUntilText; replace the rest with one
+  // placeholder run.
+  let splitIdx = tokens.length; // by default replace all
+  if (keepLeadingUntilText) {
+    let accumulated = "";
+    for (let i = 0; i < tokens.length; i++) {
+      const t = tokens[i];
+      if (t.kind === "r") {
+        accumulated += extractVisibleText(t.xml);
+      }
+      if (keepLeadingUntilText.test(accumulated)) {
+        splitIdx = i + 1;
+        break;
+      }
+    }
+  }
+
+  const kept = tokens.slice(0, splitIdx);
+  const trailing = tokens.slice(splitIdx);
+
+  // Decide rPr for the placeholder run: prefer the LAST run in trailing
+  // (that's the actual "value" run in the reference), fallback to the
+  // first run, fallback to explicit valueRPr arg, fallback to nothing.
+  let runRPr = valueRPr || "";
+  if (!runRPr) {
+    // Try last <w:r> in trailing
+    for (let i = trailing.length - 1; i >= 0; i--) {
+      if (trailing[i].kind === "r") {
+        const m = trailing[i].xml.match(/<w:rPr>[\s\S]*?<\/w:rPr>/);
+        if (m) {
+          runRPr = m[0];
+          break;
+        }
+      }
+    }
+  }
+  if (!runRPr) {
+    for (const t of trailing) {
+      if (t.kind === "r") {
+        const m = t.xml.match(/<w:rPr>[\s\S]*?<\/w:rPr>/);
+        if (m) {
+          runRPr = m[0];
+          break;
+        }
+      }
+    }
+  }
+
+  // Preserve any trailing non-run tokens (bookmarks) — append them after
+  // the placeholder run so document structure remains valid.
+  const trailingNonRuns = trailing.filter((t) => t.kind !== "r").map((t) => t.xml).join("");
+
+  const placeholderRun = `<w:r>${runRPr}<w:t xml:space="preserve">${placeholder}</w:t></w:r>`;
+
+  return (
+    openTag +
+    pPr +
+    kept.map((t) => t.xml).join("") +
+    placeholderRun +
+    trailingNonRuns +
+    close
   );
-  return row1 + row2;
 }
 
-// Section title row: not used in current layout, kept for future reuse.
-// eslint-disable-next-line no-unused-vars
-function sectionRow() {}
+/**
+ * Tokenize the body of a paragraph (after <w:pPr>) into a sequence of
+ * top-level child elements: runs (<w:r>), bookmarks (<w:bookmarkStart/>,
+ * <w:bookmarkEnd/>), and any other elements.  Each token preserves its
+ * full source XML.
+ */
+function tokenizeRuns(body) {
+  const out = [];
+  let i = 0;
+  while (i < body.length) {
+    while (i < body.length && /\s/.test(body[i])) i++;
+    if (i >= body.length) break;
+    if (body[i] !== "<") {
+      i++;
+      continue;
+    }
+    let j = i + 1;
+    while (j < body.length && !/[\s>\/]/.test(body[j])) j++;
+    const tagName = body.substring(i + 1, j);
+    while (j < body.length && body[j] !== ">") j++;
+    const isSelfClose = body[j - 1] === "/";
+    j++;
+    if (isSelfClose) {
+      out.push({ kind: tagName === "w:r" ? "r" : "other", xml: body.substring(i, j) });
+      i = j;
+      continue;
+    }
+    const closeTag = `</${tagName}>`;
+    let depth = 1;
+    let k = j;
+    const openTag1 = `<${tagName}>`;
+    const openTag2 = `<${tagName} `;
+    while (k < body.length && depth > 0) {
+      const nextClose = body.indexOf(closeTag, k);
+      if (nextClose < 0) {
+        depth = 0;
+        k = body.length;
+        break;
+      }
+      let scan = k;
+      while (true) {
+        const a = body.indexOf(openTag1, scan);
+        const b = body.indexOf(openTag2, scan);
+        let next;
+        if (a < 0 && b < 0) next = -1;
+        else if (a < 0) next = b;
+        else if (b < 0) next = a;
+        else next = Math.min(a, b);
+        if (next < 0 || next > nextClose) break;
+        depth++;
+        scan = next + openTag1.length;
+      }
+      depth--;
+      k = nextClose + closeTag.length;
+    }
+    out.push({ kind: tagName === "w:r" ? "r" : "other", xml: body.substring(i, k) });
+    i = k;
+  }
+  return out;
+}
 
-function valueRow(label, prefix) {
-  return tr(
-    tc(cellP("", {}), { width: W.code, vMerge: "continue" }),
-    tc(cellP("", {}), { width: W.position, vMerge: "continue" }),
-    tc(cellP(label, { italic: true, size: 16, align: "left" }), { width: W.indicator }),
-    tc(cellP(`{${prefix}_value}`, { size: 16 }), { width: W.value }),
-    tc(cellP(`{${prefix}_c1}`, { bold: true, size: 18 }), { width: W.cls }),
-    tc(cellP(`{${prefix}_c2}`, { bold: true, size: 18 }), { width: W.cls }),
-    tc(cellP(`{${prefix}_c31}`, { bold: true, size: 18 }), { width: W.cls }),
-    tc(cellP(`{${prefix}_c32}`, { bold: true, size: 18 }), { width: W.cls }),
+function extractVisibleText(xml) {
+  return xml
+    .replace(/<w:instrText[\s\S]*?<\/w:instrText>/g, "")
+    .replace(/<[^>]+>/g, "");
+}
+
+// -------------------------------------------------------------------------
+// Main pipeline
+// -------------------------------------------------------------------------
+
+const buf = fs.readFileSync(REF_DOCX);
+const zip = new PizZip(buf);
+let docXml = zip.file("word/document.xml").asText();
+
+const bodyStartTagEnd = docXml.indexOf("<w:body>") + "<w:body>".length;
+const bodyEndTagStart = docXml.indexOf("</w:body>");
+const bodyHeader = docXml.substring(0, bodyStartTagEnd);
+const bodyFooter = docXml.substring(bodyEndTagStart);
+
+const allChildren = findTopLevelChildren(docXml, bodyStartTagEnd, bodyEndTagStart);
+
+// The reference has 55 workplace blocks stacked. We keep only the first
+// (children[0..41]) — that's children for the first workplace ending right
+// BEFORE the second "Центр экспертной" header (which is children[42]).
+const KEEP_FROM = 0;
+// inclusive: last paragraph of the workplace that we WANT to repeat.  The
+// reference has 14 filler empty paragraphs after the signature block (used
+// once on page 1 to vertical-pad before the page break) — we drop those
+// and emit an explicit <w:br w:type="page"/> instead, so every workplace
+// starts on a fresh page just like the reference does for workplaces 2+.
+const KEEP_TO = 26;
+const SECT_PR = allChildren[allChildren.length - 1]; // <w:sectPr>
+if (SECT_PR.tag !== "w:sectPr") {
+  throw new Error(
+    `Expected last child to be <w:sectPr>, got <${SECT_PR.tag}> — refusing to proceed.`,
   );
 }
 
-// Like valueRow — оставлено для совместимости, сейчас неиспользуется.
-// eslint-disable-next-line no-unused-vars
-function valueRowFirst() {}
+// Slice the kept block from byte ranges.
+const blockStart = allChildren[KEEP_FROM].start;
+const blockEnd = allChildren[KEEP_TO].end;
+let blockXml = docXml.substring(blockStart, blockEnd);
+const sectPrXml = docXml.substring(SECT_PR.start, SECT_PR.end);
 
-// Section header row. If `start` is true — opens vMerge in code/position cells
-// with the workplace's {code} and {position}; otherwise continues the merge.
-function groupTitleRow(title, start = false) {
-  const codeCell = start
-    ? tc(cellP("{code}", { bold: true, size: 18 }), { width: W.code, vMerge: "restart" })
-    : tc(cellP("", {}), { width: W.code, vMerge: "continue" });
-  const posCell = start
-    ? tc(cellP("{position}", { bold: true, size: 18 }), { width: W.position, vMerge: "restart" })
-    : tc(cellP("", {}), { width: W.position, vMerge: "continue" });
-  return tr(
-    codeCell,
-    posCell,
-    tc(cellP(title, { bold: true, italic: true, size: 16, align: "left" }), { width: W.indicator + W.value + W.cls * 4, gridSpan: 6, shd: "F2F2F2" }),
+console.log(
+  `Kept block: children[${KEEP_FROM}..${KEEP_TO}] = ${KEEP_TO - KEEP_FROM + 1} top-level elements, ${blockXml.length} bytes`,
+);
+
+// -------------------------------------------------------------------------
+// PASS 1: text-injection inside the block.
+//
+// We operate on whole-paragraph or whole-table-cell substrings located via
+// findTopLevelChildren on the *block* itself.
+// -------------------------------------------------------------------------
+
+const blockChildren = findTopLevelChildren(blockXml, 0, blockXml.length);
+console.log(`Block has ${blockChildren.length} top-level children`);
+
+// Sanity check — confirm structural assumptions
+const expectedTags = ["w:tbl", "w:p", "w:p", "w:p", "w:p", "w:p", "w:p", "w:p", "w:p", "w:p", "w:p", "w:p", "w:p", "w:tbl"];
+for (let i = 0; i < expectedTags.length; i++) {
+  if (blockChildren[i].tag !== expectedTags[i]) {
+    throw new Error(
+      `Structural mismatch at child[${i}]: expected <${expectedTags[i]}>, got <${blockChildren[i].tag}>`,
+    );
+  }
+}
+
+// We will build a list of byte-range replacements (in block coords) then
+// apply them right-to-left so earlier offsets stay valid.
+/** @type {{start:number, end:number, replacement:string}[]} */
+const edits = [];
+
+// ---- Header table (child[0]) ----
+// The letterhead table is static — keep verbatim. No edits.
+
+// ---- child[2]: "ПРОТОКОЛ № 0 SEQ Протокол ..." paragraph ----
+{
+  const c = blockChildren[2];
+  const xml = blockXml.substring(c.start, c.end);
+  // Replace the SEQ field's separated text "1" — keep the literal " 0"
+  // prefix and the rest of the field structure intact?  Simpler: replace
+  // EVERYTHING after the literal "№" with " {protocol.number}-{rowNumber}".
+  // To keep formatting (italic / Times New Roman / bCs), we keep the runs
+  // up to and including the run that emits "№", then drop the rest.
+  const replaced = replaceParagraphValue(
+    xml,
+    " {protocol.number}-{rowNumber}",
+    { keepLeadingUntilText: /№$/ },
   );
+  edits.push({ start: c.start, end: c.end, replacement: replaced });
 }
 
-function indicatorsTable() {
-  const tblPr = `<w:tblPr><w:tblW w:w="10000" w:type="dxa"/><w:tblLayout w:type="fixed"/><w:tblBorders><w:top w:val="single" w:sz="4" w:color="auto"/><w:left w:val="single" w:sz="4" w:color="auto"/><w:bottom w:val="single" w:sz="4" w:color="auto"/><w:right w:val="single" w:sz="4" w:color="auto"/><w:insideH w:val="single" w:sz="4" w:color="auto"/><w:insideV w:val="single" w:sz="4" w:color="auto"/></w:tblBorders></w:tblPr>`;
-  const grid = `<w:tblGrid>${[W.code, W.position, W.indicator, W.value, W.cls, W.cls, W.cls, W.cls].map(w => `<w:gridCol w:w="${w}"/>`).join("")}</w:tblGrid>`;
-
-  const headerRows = tableHeader();
-
-  const rows = [
-    groupTitleRow("1. Физикалық динамикалық жүктеме (кг·м) / Физическая динамическая нагрузка (кг·м)", true),
-    valueRow("Жүктің аймақтық – орнын ауыстыру 1м дейін (Региональная – перемещение груза до 1м)", "p1_1"),
-    groupTitleRow("Жалпы жүктеме: жүктің орын ауыстыруы / Общая нагрузка: перемещение груза"),
-    valueRow("от 1 до 5 м", "p1_2a"),
-    valueRow("более 5 м", "p1_2b"),
-
-    groupTitleRow("2. Қолмен көтеретін және орнын ауыстырып қоятын жүктің (кг) / Масса поднимаемого и перемещаемого вручную груза (кг)"),
-    valueRow("2.1. При чередовании с другой работой", "p2_1"),
-    valueRow("2.2. Постоянно в течение смены", "p2_2"),
-    valueRow("2.3. Суммарная масса за час смены — с рабочей поверхности", "p2_3a"),
-    valueRow("2.3. Суммарная масса за час смены — с пола", "p2_3b"),
-
-    groupTitleRow("3. Стереотиптік жұмысшы қозғалыстары (саны) / Стереотипные рабочие движения (кол-во)"),
-    valueRow("3.1. Локальная нагрузка", "p3_1"),
-    valueRow("3.2. Региональная нагрузка", "p3_2"),
-
-    groupTitleRow("4. Статикалық жүктеме (кгс·сек) / Статическая нагрузка (кгс·сек)"),
-    valueRow("4.1. Одной рукой", "p4_1"),
-    valueRow("4.2. Двумя руками", "p4_2"),
-    valueRow("4.3. С участием корпуса и ног", "p4_3"),
-
-    groupTitleRow("5. Жұмысшы кейіпінде / Рабочая поза"),
-    valueRow("Рабочая поза", "p5"),
-
-    groupTitleRow("6. Дененің еңкейуі (ауыспалы жұмыстағы саны) / Наклоны корпуса (количество за смену)"),
-    valueRow("Наклоны корпуса", "p6"),
-
-    groupTitleRow("7. Кеңістікте орын ауыстыруы (км) / Перемещение в пространстве (км)"),
-    valueRow("7.1. По горизонтали", "p7_1"),
-    valueRow("7.2. По вертикали", "p7_2"),
-  ].join("");
-
-  return `<w:tbl>${tblPr}${grid}${headerRows}${rows}</w:tbl>`;
-}
-
-function finalAssessmentBlock() {
-  return [
-    p("Еңбек ауырлығын бағалау (Окончательная оценка тяжести труда): {finalAssessment}", { bold: true, size: 22, before: 120 }),
-  ].join("");
-}
-
-function signaturesBlock() {
-  return [
-    p("Өлшеуді жүргізген / Оценку проводил: {performer.position}    {performer.fullName}", { size: 22, before: 200 }),
-    p("Ұйымның өкілі / Представитель организации: {representative.position}    {representative.fullName}", { size: 22 }),
-  ].join("");
-}
-
-// Page break paragraph (used between cards)
-function pageBreak() {
-  return `<w:p><w:r><w:br w:type="page"/></w:r></w:p>`;
-}
-
-// -------- Compose document.xml --------
-
-function buildDocumentXml() {
-  const sectPr = `<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720" w:header="708" w:footer="708" w:gutter="0"/><w:cols w:space="708"/><w:docGrid w:linePitch="360"/></w:sectPr>`;
-
-  const cardBody = [
-    labHeader(),
-    protocolTitle(),
-    customerBlock(),
-    indicatorsTable(),
-    finalAssessmentBlock(),
-    signaturesBlock(),
-  ].join("");
-
-  // Workplaces loop: open marker, card, close marker.
-  // Page break between cards is rendered AFTER card body but inside the loop;
-  // for the last card it leaves a trailing blank page — acceptable for this use case.
-  const body = `<w:body>${ctrl("{#workplaces}")}${cardBody}${pageBreak()}${ctrl("{/workplaces}")}${sectPr}</w:body>`;
-
-  const docOpen = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">`;
-  return `${docOpen}${body}</w:document>`;
-}
-
-// -------- Build --------
-
-function build() {
-  const baseBuf = fs.readFileSync(BASE_TEMPLATE);
-  const zip = new PizZip(baseBuf);
-
-  // Remove image/footer references that lighting template carries but heaviness shouldn't need.
-  // We keep them in the zip (innocuous), but our document.xml.rels will be replaced
-  // with a stripped version that only references the parts we use.
-  const newRels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/><Relationship Id="rId6" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/webSettings" Target="webSettings.xml"/><Relationship Id="rId7" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/><Relationship Id="rId8" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes" Target="endnotes.xml"/><Relationship Id="rId12" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable" Target="fontTable.xml"/><Relationship Id="rId13" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/><Relationship Id="rId4" Type="http://schemas.microsoft.com/office/2007/relationships/stylesWithEffects" Target="stylesWithEffects.xml"/><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml" Target="../customXml/item1.xml"/></Relationships>`;
-
-  zip.file("word/document.xml", buildDocumentXml());
-  zip.file("word/_rels/document.xml.rels", newRels);
-
-  // drop unused parts to keep the file clean
-  ["word/footer1.xml", "word/media/image1.png", "word/media/image2.png", "word/document.xml.new"].forEach(
-    (p) => {
-      if (zip.file(p)) zip.remove(p);
-    },
+// ---- child[6]: customer paragraph ----
+// "Тапсырыс берушінің атауы және мекен-жайы (наименование и адрес заказчика):
+//   <MERGEFIELD Наименование_и_Адрес ТОО «KazEcoFood», ...>"
+// Keep everything up to & incl. the ":" then replace the value runs
+// (which include a complex MERGEFIELD) with " {customer.name}, {customer.address}".
+{
+  const c = blockChildren[6];
+  const xml = blockXml.substring(c.start, c.end);
+  const replaced = replaceParagraphValue(
+    xml,
+    " {customer.name}, {customer.address}",
+    { keepLeadingUntilText: /:$/ },
   );
-
-  // Fix Content_Types accordingly: remove footer override and png Default.
-  const ct = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/customXml/itemProps1.xml" ContentType="application/vnd.openxmlformats-officedocument.customXmlProperties+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/word/stylesWithEffects.xml" ContentType="application/vnd.ms-word.stylesWithEffects+xml"/><Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/><Override PartName="/word/webSettings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.webSettings+xml"/><Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/><Override PartName="/word/endnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml"/><Override PartName="/word/fontTable.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml"/><Override PartName="/word/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/></Types>`;
-  zip.file("[Content_Types].xml", ct);
-
-  const out = zip.generate({ type: "nodebuffer" });
-  fs.writeFileSync(OUT_TEMPLATE, out);
-  console.log(`Wrote ${OUT_TEMPLATE} (${out.length} bytes)`);
+  edits.push({ start: c.start, end: c.end, replacement: replaced });
 }
 
-build();
+// ---- child[7]: measurementPlace ----
+{
+  const c = blockChildren[7];
+  const xml = blockXml.substring(c.start, c.end);
+  const replaced = replaceParagraphValue(xml, " {measurementPlace}", {
+    keepLeadingUntilText: /:$/,
+  });
+  edits.push({ start: c.start, end: c.end, replacement: replaced });
+}
+
+// ---- child[8]: position ----
+{
+  const c = blockChildren[8];
+  const xml = blockXml.substring(c.start, c.end);
+  const replaced = replaceParagraphValue(xml, " {position}", {
+    keepLeadingUntilText: /:$/,
+  });
+  edits.push({ start: c.start, end: c.end, replacement: replaced });
+}
+
+// ---- child[9]: date ----
+{
+  const c = blockChildren[9];
+  const xml = blockXml.substring(c.start, c.end);
+  const replaced = replaceParagraphValue(
+    xml,
+    " «{measurementDate.day}» {measurementDate.month} {measurementDate.year} г.",
+    { keepLeadingUntilText: /:$/ },
+  );
+  edits.push({ start: c.start, end: c.end, replacement: replaced });
+}
+
+// ---- child[10]: workDescription ----
+{
+  const c = blockChildren[10];
+  const xml = blockXml.substring(c.start, c.end);
+  const replaced = replaceParagraphValue(xml, " {workDescription}", {
+    keepLeadingUntilText: /:\s*$/,
+  });
+  edits.push({ start: c.start, end: c.end, replacement: replaced });
+}
+
+// ---- child[13]: the big results table ----
+{
+  const tableChild = blockChildren[13];
+  const tableXml = blockXml.substring(tableChild.start, tableChild.end);
+  const rows = findRows(tableXml);
+  console.log(`Big table has ${rows.length} rows`);
+
+  // Helper to emit edits in TABLE-LOCAL coords first, then shift to block coords.
+  const tableEdits = []; // {start, end, replacement} in table-local
+
+  // row[2]: code + position in cells 0 and 1 (vMerge restart); cells 2..7
+  // belong to the section-1 header.
+  {
+    const r = rows[2];
+    const rowXml = tableXml.substring(r.start, r.end);
+    const cells = findCells(rowXml);
+    if (cells.length < 2) throw new Error("row[2]: <2 cells");
+    // cell 0 → {code}
+    {
+      const cellXml = rowXml.substring(cells[0].start, cells[0].end);
+      const newCell = replaceCellTextWithPlaceholder(cellXml, "{code}");
+      tableEdits.push({
+        start: r.start + cells[0].start,
+        end: r.start + cells[0].end,
+        replacement: newCell,
+      });
+    }
+    // cell 1 → {position}
+    {
+      const cellXml = rowXml.substring(cells[1].start, cells[1].end);
+      const newCell = replaceCellTextWithPlaceholder(cellXml, "{position}");
+      tableEdits.push({
+        start: r.start + cells[1].start,
+        end: r.start + cells[1].end,
+        replacement: newCell,
+      });
+    }
+  }
+
+  // Data rows: each maps to an indicator prefix.  We replace cell 3
+  // (value), cell 4 (c1), cell 5 (c2), cell 6 (c31), cell 7 (c32).
+  const dataRows = [
+    { row: 3, prefix: "p1_1" },
+    { row: 5, prefix: "p1_2a" },
+    { row: 6, prefix: "p1_2b" },
+    { row: 8, prefix: "p2_1" },
+    { row: 9, prefix: "p2_2" },
+    { row: 11, prefix: "p2_3a" },
+    { row: 12, prefix: "p2_3b" },
+    { row: 14, prefix: "p3_1" },
+    { row: 15, prefix: "p3_2" },
+    { row: 17, prefix: "p4_1" },
+    { row: 18, prefix: "p4_2" },
+    { row: 19, prefix: "p4_3" },
+    { row: 20, prefix: "p5" },
+    { row: 21, prefix: "p6" },
+    { row: 23, prefix: "p7_1" },
+    { row: 24, prefix: "p7_2" },
+  ];
+  for (const { row: ri, prefix } of dataRows) {
+    const r = rows[ri];
+    if (!r) throw new Error(`Missing row ${ri}`);
+    const rowXml = tableXml.substring(r.start, r.end);
+    const cells = findCells(rowXml);
+    if (cells.length !== 8) {
+      throw new Error(
+        `row[${ri}] (${prefix}) has ${cells.length} cells, expected 8`,
+      );
+    }
+    const labels = ["value", "c1", "c2", "c31", "c32"];
+    for (let k = 0; k < 5; k++) {
+      const cellIdx = 3 + k;
+      const cellXml = rowXml.substring(cells[cellIdx].start, cells[cellIdx].end);
+      const ph = `{${prefix}_${labels[k]}}`;
+      const newCell = replaceCellTextWithPlaceholder(cellXml, ph);
+      tableEdits.push({
+        start: r.start + cells[cellIdx].start,
+        end: r.start + cells[cellIdx].end,
+        replacement: newCell,
+      });
+    }
+  }
+
+  // row[25]: final assessment in cell 1.
+  {
+    const r = rows[25];
+    if (!r) throw new Error("Missing row 25 (final assessment)");
+    const rowXml = tableXml.substring(r.start, r.end);
+    const cells = findCells(rowXml);
+    if (cells.length < 2) throw new Error("row[25]: <2 cells");
+    const cellXml = rowXml.substring(cells[1].start, cells[1].end);
+    const newCell = replaceCellTextWithPlaceholder(cellXml, "{finalAssessment}");
+    tableEdits.push({
+      start: r.start + cells[1].start,
+      end: r.start + cells[1].end,
+      replacement: newCell,
+    });
+  }
+
+  // Apply table edits right-to-left
+  tableEdits.sort((a, b) => b.start - a.start);
+  let newTable = tableXml;
+  for (const e of tableEdits) {
+    newTable = newTable.substring(0, e.start) + e.replacement + newTable.substring(e.end);
+  }
+
+  // Schedule one block-level edit replacing the entire table
+  edits.push({
+    start: tableChild.start,
+    end: tableChild.end,
+    replacement: newTable,
+  });
+}
+
+// ---- Signature paragraphs ----
+//  child[19] "Оценку проводил:  ...  Специалист лаборатории" → keep label, replace name part with {performer.position}
+//  child[20] "...Исаева А.В...." → {performer.fullName}
+//  child[24] "Инженер по БиОТ" → {representative.position}
+//  child[25] MERGEFIELD Богачев А.И. → {representative.fullName}
+
+// child[19]: keep "Оценку проводил:" + indentation, replace "Специалист лаборатории" portion
+{
+  const c = blockChildren[19];
+  const xml = blockXml.substring(c.start, c.end);
+  const replaced = replaceParagraphValue(xml, "{performer.position}", {
+    keepLeadingUntilText: /:.*\s$/,
+  });
+  edits.push({ start: c.start, end: c.end, replacement: replaced });
+}
+
+// child[20]: only the name "Исаева А.В."; this paragraph is just whitespace + name + whitespace.
+// We replace everything (whole paragraph becomes whitespace + placeholder).
+// Preserve the leading whitespace run for visual indentation by using keepLeadingUntilText
+// matching the long spaces.  But simpler: just leave the leading spaces run intact and
+// place placeholder after.
+{
+  const c = blockChildren[20];
+  const xml = blockXml.substring(c.start, c.end);
+  const replaced = replaceParagraphValue(xml, "{performer.fullName}", {
+    // keep all leading whitespace-only runs
+    keepLeadingUntilText: /\S/,
+  });
+  // Hmm — that condition triggers when we hit the first non-space char.
+  // But the FIRST run with non-space is "Исаева А.В." which we WANT to drop.
+  // We instead want to keep all runs whose text is pure whitespace.
+  // Easier custom approach: keep all whitespace-only runs, drop the rest.
+  const customised = (function () {
+    const openTagEnd = xml.indexOf(">") + 1;
+    const openTag = xml.substring(0, openTagEnd);
+    const inner = xml.substring(openTagEnd, xml.length - "</w:p>".length);
+    let pPr = "";
+    let body = inner;
+    const pPrMatch = inner.match(/^\s*<w:pPr>[\s\S]*?<\/w:pPr>/);
+    if (pPrMatch) {
+      pPr = pPrMatch[0];
+      body = inner.substring(pPrMatch[0].length);
+    }
+    const tokens = tokenizeRuns(body);
+    // Find first run with non-whitespace text → that's the name; drop it
+    // and everything after.
+    let cutAt = tokens.length;
+    let nameRPr = "";
+    for (let i = 0; i < tokens.length; i++) {
+      if (tokens[i].kind !== "r") continue;
+      const t = extractVisibleText(tokens[i].xml);
+      if (/\S/.test(t)) {
+        cutAt = i;
+        const m = tokens[i].xml.match(/<w:rPr>[\s\S]*?<\/w:rPr>/);
+        if (m) nameRPr = m[0];
+        break;
+      }
+    }
+    const kept = tokens.slice(0, cutAt);
+    const placeholderRun = `<w:r>${nameRPr}<w:t xml:space="preserve">{performer.fullName}</w:t></w:r>`;
+    return (
+      openTag + pPr + kept.map((t) => t.xml).join("") + placeholderRun + "</w:p>"
+    );
+  })();
+  // Use the customised variant
+  edits.push({ start: c.start, end: c.end, replacement: customised });
+  // (the earlier `replaced` is discarded — never pushed)
+  void replaced;
+}
+
+// child[24]: "Инженер по БиОТ" — single non-whitespace text run.
+{
+  const c = blockChildren[24];
+  const xml = blockXml.substring(c.start, c.end);
+  const customised = (function () {
+    const openTagEnd = xml.indexOf(">") + 1;
+    const openTag = xml.substring(0, openTagEnd);
+    const inner = xml.substring(openTagEnd, xml.length - "</w:p>".length);
+    let pPr = "";
+    let body = inner;
+    const pPrMatch = inner.match(/^\s*<w:pPr>[\s\S]*?<\/w:pPr>/);
+    if (pPrMatch) {
+      pPr = pPrMatch[0];
+      body = inner.substring(pPrMatch[0].length);
+    }
+    const tokens = tokenizeRuns(body);
+    // Drop all <w:r>, insert one placeholder run with rPr cloned from the
+    // first existing run (italic Times New Roman size 24).
+    let rPr = "";
+    for (const t of tokens) {
+      if (t.kind !== "r") continue;
+      const m = t.xml.match(/<w:rPr>[\s\S]*?<\/w:rPr>/);
+      if (m) {
+        rPr = m[0];
+        break;
+      }
+    }
+    const placeholderRun = `<w:r>${rPr}<w:t xml:space="preserve">{representative.position}</w:t></w:r>`;
+    const nonRunTokens = tokens.filter((t) => t.kind !== "r").map((t) => t.xml).join("");
+    return openTag + pPr + placeholderRun + nonRunTokens + "</w:p>";
+  })();
+  edits.push({ start: c.start, end: c.end, replacement: customised });
+}
+
+// child[25]: MERGEFIELD ФИО_ Богачев А.И. — drop the entire complex field
+// and replace with a single run.
+{
+  const c = blockChildren[25];
+  const xml = blockXml.substring(c.start, c.end);
+  const customised = (function () {
+    const openTagEnd = xml.indexOf(">") + 1;
+    const openTag = xml.substring(0, openTagEnd);
+    const inner = xml.substring(openTagEnd, xml.length - "</w:p>".length);
+    let pPr = "";
+    let body = inner;
+    const pPrMatch = inner.match(/^\s*<w:pPr>[\s\S]*?<\/w:pPr>/);
+    if (pPrMatch) {
+      pPr = pPrMatch[0];
+      body = inner.substring(pPrMatch[0].length);
+    }
+    const tokens = tokenizeRuns(body);
+    // Find the rPr from the run that actually contains the visible name
+    // (the one between fldChar separate and end).  We just look for the
+    // first <w:t> in any run.
+    let rPr = "";
+    for (const t of tokens) {
+      if (t.kind !== "r") continue;
+      if (/<w:t[\s>]/.test(t.xml)) {
+        const m = t.xml.match(/<w:rPr>[\s\S]*?<\/w:rPr>/);
+        if (m) {
+          rPr = m[0];
+          break;
+        }
+      }
+    }
+    if (!rPr) {
+      for (const t of tokens) {
+        if (t.kind !== "r") continue;
+        const m = t.xml.match(/<w:rPr>[\s\S]*?<\/w:rPr>/);
+        if (m) {
+          rPr = m[0];
+          break;
+        }
+      }
+    }
+    const placeholderRun = `<w:r>${rPr}<w:t xml:space="preserve">{representative.fullName}</w:t></w:r>`;
+    return openTag + pPr + placeholderRun + "</w:p>";
+  })();
+  edits.push({ start: c.start, end: c.end, replacement: customised });
+}
+
+// -------------------------------------------------------------------------
+// Apply all block edits right-to-left.
+// -------------------------------------------------------------------------
+edits.sort((a, b) => b.start - a.start);
+let newBlock = blockXml;
+for (const e of edits) {
+  newBlock = newBlock.substring(0, e.start) + e.replacement + newBlock.substring(e.end);
+}
+
+// -------------------------------------------------------------------------
+// Wrap the block with {#workplaces} ... {/workplaces} loop tags.
+//
+// docxtemplater with paragraphLoop:true treats a paragraph containing
+// JUST a loop tag as the loop boundary and removes that paragraph from
+// output. So we add two minimal paragraphs.
+// -------------------------------------------------------------------------
+const loopStartP =
+  `<w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/>` +
+  `<w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/>` +
+  `<w:sz w:val="2"/></w:rPr></w:pPr>` +
+  `<w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/>` +
+  `<w:sz w:val="2"/></w:rPr><w:t xml:space="preserve">{#workplaces}</w:t></w:r></w:p>`;
+const loopEndP = loopStartP.replace("{#workplaces}", "{/workplaces}");
+
+// Hard page break placed at the end of each iteration so workplace N+1
+// starts on a new page (matches the reference's per-page-per-workplace
+// layout).
+const pageBreakP =
+  `<w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>` +
+  `<w:r><w:br w:type="page"/></w:r></w:p>`;
+
+const newBody =
+  bodyHeader +
+  loopStartP +
+  newBlock +
+  pageBreakP +
+  loopEndP +
+  sectPrXml +
+  bodyFooter;
+
+// -------------------------------------------------------------------------
+// Write new document.xml back into a copy of the reference DOCX.
+// We KEEP everything else (numbering.xml, styles.xml, theme, fontTable,
+// header1.xml, etc.) verbatim — they back the formatting we just preserved.
+// -------------------------------------------------------------------------
+zip.file("word/document.xml", newBody);
+
+const outBuf = zip.generate({ type: "nodebuffer" });
+fs.writeFileSync(OUT_TEMPLATE, outBuf);
+console.log(`Wrote ${OUT_TEMPLATE} (${outBuf.length} bytes)`);
+console.log(
+  `New document.xml: ${newBody.length} bytes (reference body was ${bodyEndTagStart - bodyStartTagEnd} bytes)`,
+);

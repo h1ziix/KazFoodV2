@@ -8,7 +8,6 @@ import {
   TemplateRenderError,
 } from "./docs/engine";
 import { flatten } from "./docs/flatten";
-import { flattenSectionsRows } from "./docs/rows";
 
 const TEMPLATE_URL = "/templates/safety-protocol.docx";
 
@@ -35,8 +34,6 @@ export function renderSafetyBlob(
 export function buildTemplateContext(
   data: SafetyProtocol,
 ): Record<string, unknown> {
-  // docxtemplater 3.x не разворачивает теги с точкой автоматически —
-  // используем плоские ключи и пробрасываем их во вложенные циклы.
   const rootFlat = flatten({
     protocol: data.protocol,
     customer: data.customer,
@@ -46,9 +43,21 @@ export function buildTemplateContext(
   });
   rootFlat["measurementPlace"] = data.measurementPlace;
 
+  // The safety template uses a fixed two-section layout:
+  //   sections[0] -> adminMeasurements (rendered before the "2. Производственный..." section row)
+  //   sections[1] -> productionMeasurements (rendered after that section row)
+  // Any extra sections beyond index 1 are appended to productionMeasurements
+  // to avoid data loss.
+  const admin = data.sections[0]?.rows ?? [];
+  const productionRows: SafetyRow[] = [];
+  for (let i = 1; i < data.sections.length; i++) {
+    productionRows.push(...data.sections[i].rows);
+  }
+
   return {
     ...rootFlat,
-    sections: flattenSectionsRows(data.sections, mapRow, rootFlat),
+    adminMeasurements: admin.map(mapRow),
+    productionMeasurements: productionRows.map(mapRow),
   };
 }
 
