@@ -10,6 +10,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@supabase/ssr": "^0.10.3",
+    "@supabase/supabase-js": "^2.106.2",
     "docxtemplater": "^3.50.0",
     "file-saver": "^2.0.5",
     "next": "^15.2.4",
