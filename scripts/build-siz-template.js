@@ -3,24 +3,69 @@
  * "13. СИЗ каз-рус ГОТОВо kazfood.docx" via surgical XML edits on the
  * existing word/document.xml.
  *
- * Strategy mirrors scripts/build-safety-template.mjs:
+ * Strategy (mirrors scripts/build-coding-template.js and the fixed
+ * scripts/build-safety-template.mjs — the canonical pattern for
+ * documents with N разделов), but the СИЗ table has TWO distinct row
+ * layouts that must both be preserved byte-to-byte from the original:
+ *
+ *   ─ Administrative data row (6 <w:tc>, grid units 1+2+1+3+1+1=9):
+ *     | code | position(gs=2) | count | normItems(gs=3, merges norm+
+ *       issuedFact+certificate) | assessment | note |
+ *     Used when issuedFact/certificate are "-" — visually the long
+ *     "не предусмотрено, согласно Нормам…" text fills the merged area.
+ *
+ *   ─ Production data row (8 <w:tc>, grid units 1+2+1+1+1+1+1+1=9):
+ *     | code | position(gs=2) | count | normItems | issuedFact |
+ *       certificate | assessment | note |
+ *     Used for productive workers with split factual columns.
+ *
  *   - The ORIGINAL DOCX is the structural source-of-truth.
- *   - We do NOT rebuild document.xml. We only:
- *       * replace inner text of existing <w:t> nodes with placeholders;
- *       * collapse the MERGEFIELD «дата проведения» run group into a
- *         single placeholder run, preserving its <w:rPr>;
- *       * replace each data row's cell paragraphs with a single
- *         placeholder run (keeping the cell's <w:tcPr> intact);
- *       * wrap the admin row block with {#adminRows}..{/adminRows} and
- *         the production row block with {#productionRows}..{/productionRows}.
- *   - The page setup, header1.xml ("Приложение № 5 к Приказу МЗ РК 1057
- *     от 28.12.2015г."), styles, numbering, fonts, table geometry,
- *     paragraph properties, run formatting, borders, widths, merged
- *     cells, footer/signature layout and all spacing are preserved
- *     exactly because the entire docx package is reused.
+ *   - Top-level placeholders OUTSIDE the main table are injected by
+ *     surgical <w:t> replacements / run collapses.
+ *   - Inside the main table we keep the column-header row(s) verbatim,
+ *     and BUILD ONE GENERIC SECTION BLOCK that consists of:
+ *         1) section_header_row — the admin section row (one big cell
+ *            with gridSpan=9), collapsed into a single <w:r> carrying
+ *            {section_header}.
+ *         2) admin_data_row     — the original 6-cell admin row,
+ *            templatized to 6 placeholders, wrapped in a conditional
+ *            {-w:tr isMerged}…{/isMerged} so it renders only when the
+ *            current item has isMerged === true.
+ *         3) prod_data_row      — the original 8-cell production row,
+ *            templatized to 8 placeholders, wrapped in
+ *            {-w:tr isSplit}…{/isSplit} so it renders only when
+ *            isSplit === true (mutually exclusive с isMerged — оба
+ *            флага выставляются в generateSizDocx.ts.mapRow()).
+ *     The two data rows together are wrapped in the INNER loop
+ *     {#rows}…{/rows} (open in first <w:t> of admin row's first cell,
+ *     close in last <w:t> of prod row's last cell — paragraphLoop=true
+ *     promotes this to a per-row iteration that emits exactly one of
+ *     the two row variants per item).
+ *     Both data rows + section header are wrapped in the OUTER loop
+ *     {#sections}…{/sections}.
+ *   - Everything between the admin section row start and the closing
+ *     </w:tbl> (original admin data rows + original production section
+ *     row + production data rows) is dropped — the outer loop
+ *     replicates the templated triplet N times.
+ *
+ * Final shape:
+ *     {#sections}
+ *       {section_header}
+ *       {#rows}
+ *         [-w:tr isMerged]   admin 6-cell row (gridSpan=3 on normItems)
+ *                            {code}|{position}|{count}|{normItems}|
+ *                            {assessment}|{note}
+ *         [-w:tr isSplit]    prod 8-cell row
+ *                            {code}|{position}|{count}|{normItems}|
+ *                            {issuedFact}|{certificate}|{assessment}|
+ *                            {note}
+ *       {/rows}
+ *     {/sections}
  *
  * Run: node scripts/build-siz-template.js
  */
+
+"use strict";
 
 const fs = require("fs");
 const path = require("path");
@@ -73,11 +118,6 @@ function findElementEnd(xml, tag, openIdx) {
   throw new Error(`Could not find end of <${tag}>`);
 }
 
-/**
- * Replace the text inside an EXACT <w:t>oldText</w:t> match.
- * The match must be unique inside `xml`; otherwise throws (caller
- * should pick a more specific anchor).
- */
 function replaceWtExact(xml, oldText, newText) {
   const esc = oldText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const re = new RegExp(`<w:t(\\s[^>]*)?>${esc}</w:t>`, "g");
@@ -97,10 +137,6 @@ function replaceWtExact(xml, oldText, newText) {
   return xml.replace(m[0], `<w:t${attrs}>${newText}</w:t>`);
 }
 
-/**
- * Locate a <w:tr> by an anchor string contained somewhere inside it.
- * Returns { start, end } byte offsets.
- */
 function locateRowByAnchor(xml, anchor, fromIdx = 0) {
   const ai = xml.indexOf(anchor, fromIdx);
   if (ai === -1) throw new Error(`Anchor not found: ${anchor.slice(0, 80)}`);
@@ -110,34 +146,19 @@ function locateRowByAnchor(xml, anchor, fromIdx = 0) {
   return { start, end };
 }
 
-/**
- * Inside one <w:tc>...</w:tc> XML chunk, REPLACE all paragraphs with a
- * single <w:p> that reuses the FIRST paragraph's <w:pPr> and the FIRST
- * run's <w:rPr>, containing a single <w:t> with `placeholder`.
- *
- * If placeholder === null, leaves a single empty paragraph (used when a
- * cell should render as empty during loop iteration but exists in the
- * row template).
- *
- * Critically: <w:tcPr> (width, gridSpan, vMerge, borders, vAlign,
- * shading) is left untouched.
- */
 function rewriteCellText(cellXml, placeholder) {
-  // Locate <w:tcPr>...</w:tcPr> end (everything before the FIRST <w:p>)
   const pStart1 = cellXml.indexOf("<w:p ");
   const pStart2 = cellXml.indexOf("<w:p>");
   const firstP =
     pStart1 !== -1 && (pStart2 === -1 || pStart1 < pStart2) ? pStart1 : pStart2;
-  if (firstP === -1) return cellXml; // nothing to do
+  if (firstP === -1) return cellXml;
   const header = cellXml.slice(0, firstP);
   const tcClose = cellXml.lastIndexOf("</w:tc>");
   const tail = cellXml.slice(tcClose);
 
-  // First <w:p ...> tag opening (we keep its attributes if any)
   const pTagEnd = cellXml.indexOf(">", firstP) + 1;
   const pOpen = cellXml.slice(firstP, pTagEnd);
 
-  // Capture the first <w:pPr>...</w:pPr> if present inside the first <w:p>
   let pPr = "";
   const pPrStart = cellXml.indexOf("<w:pPr>", firstP);
   if (pPrStart !== -1) {
@@ -148,7 +169,6 @@ function rewriteCellText(cellXml, placeholder) {
     }
   }
 
-  // Capture the first <w:rPr>...</w:rPr> from the first non-pPr run
   let rPr = "";
   const firstR1 = cellXml.indexOf("<w:r ", firstP);
   const firstR2 = cellXml.indexOf("<w:r>", firstP);
@@ -170,11 +190,6 @@ function rewriteCellText(cellXml, placeholder) {
   return `${header}${body}${tail}`;
 }
 
-/**
- * Replace every <w:tc> body in a row with the corresponding placeholder
- * (or null to leave empty). `placeholders.length` must equal the number
- * of <w:tc> cells in the row.
- */
 function templatizeRow(rowXml, placeholders) {
   const cells = [];
   let idx = 0;
@@ -199,12 +214,6 @@ function templatizeRow(rowXml, placeholders) {
   return out;
 }
 
-/**
- * Inject `{#tag}` right after the FIRST <w:t> opening and `{/tag}` just
- * before the LAST </w:t> closing inside `blockXml`. This is the trick
- * used by build-safety-template.mjs to wrap a multi-row block in a
- * docxtemplater loop without splitting any paragraph or run.
- */
 function wrapBlockWithLoop(blockXml, openTag, closeTag) {
   const tRe = /<w:t(?:\s[^>]*)?>/g;
   const m = tRe.exec(blockXml);
@@ -215,6 +224,42 @@ function wrapBlockWithLoop(blockXml, openTag, closeTag) {
   const lastClose = out.lastIndexOf("</w:t>");
   out = out.slice(0, lastClose) + closeTag + out.slice(lastClose);
   return out;
+}
+
+/**
+ * Collapse the run sequence containing startWtTag through the run
+ * containing endWtTag into a single <w:r> that keeps the FIRST run's
+ * <w:rPr> and carries the placeholder. (Mirror of the same helper in
+ * build-coding-template.js / build-safety-template.mjs.)
+ */
+function collapseRunRange(xml, startWtTag, endWtTag, placeholder) {
+  const startTextIdx = xml.indexOf(startWtTag);
+  if (startTextIdx === -1)
+    throw new Error(
+      `collapseRunRange: start anchor not found: ${startWtTag.slice(0, 80)}`,
+    );
+  const runStartA = xml.lastIndexOf("<w:r>", startTextIdx);
+  const runStartB = xml.lastIndexOf("<w:r ", startTextIdx);
+  const runStart = Math.max(runStartA, runStartB);
+  if (runStart === -1)
+    throw new Error("collapseRunRange: enclosing <w:r> not found");
+  const firstRunEnd = findElementEnd(xml, "w:r", runStart);
+  const firstRunXml = xml.slice(runStart, firstRunEnd);
+  const rPrMatch = firstRunXml.match(/<w:rPr>[\s\S]*?<\/w:rPr>/);
+  const rPr = rPrMatch ? rPrMatch[0] : "";
+
+  const endTextIdx = xml.indexOf(endWtTag, runStart);
+  if (endTextIdx === -1)
+    throw new Error(
+      `collapseRunRange: end anchor not found: ${endWtTag.slice(0, 80)}`,
+    );
+  const lastRunCloseEnd =
+    xml.indexOf("</w:r>", endTextIdx) + "</w:r>".length;
+  if (lastRunCloseEnd < endTextIdx)
+    throw new Error("collapseRunRange: </w:r> after end anchor not found");
+
+  const replacement = `<w:r>${rPr}<w:t xml:space="preserve">${placeholder}</w:t></w:r>`;
+  return xml.slice(0, runStart) + replacement + xml.slice(lastRunCloseEnd);
 }
 
 // ---------- main ----------
@@ -231,8 +276,8 @@ function main() {
   // A) Top-level placeholders OUTSIDE the data row block
   xml = injectTopLevelPlaceholders(xml);
 
-  // B) Templatize the data rows of the main table (admin + production)
-  xml = templatizeMainTable(xml);
+  // B) Templatize the main table: single dynamic {#sections}{#rows}…
+  xml = templatizeMainTableDynamic(xml);
 
   // Persist
   zip.file("word/document.xml", xml);
@@ -248,62 +293,42 @@ function main() {
   console.log(`  document.xml size: ${xml.length} bytes`);
 }
 
-// ---------- A) top-level injection ----------
+// ---------- A) top-level injection (без изменений; перенесено из старой версии) ----------
 
 function injectTopLevelPlaceholders(xml) {
-  // A.1) Protocol number appears twice in the title block:
-  //   "№1 " (Kazakh title: "№1 ХАТТАМАСЫ")  — UNIQUE
-  //   " №1" (Russian title: "ПРОТОКОЛ №1")  — UNIQUE
+  // A.1) Protocol number appears twice in the title block
   xml = replaceWtExact(xml, "\u21161 ", "\u2116{protocol.number} ");
   xml = replaceWtExact(xml, " \u21161", " \u2116{protocol.number}");
 
-  // A.2) Customer name + address — appears as ONE single <w:t> in the
-  // "Тапсырыс берушінің атауы..." paragraph.
+  // A.2) Customer name + address (single <w:t>)
   xml = replaceWtExact(
     xml,
     "\u0422\u041e\u041e \u00abKazEcoFood\u00bb, \u0410\u043b\u043c\u0430\u043d\u0438\u0441\u043a\u0430\u044f \u043e\u0431\u043b, \u041a\u0430\u0440\u0430\u0441\u0430\u0439\u0441\u043a\u0438\u0439 \u0440\u0430\u0439\u043e\u043d, \u0441\u0435\u043b\u043e \u041a\u043e\u043a\u043e\u0437\u0435\u043a, \u0443\u043b\u0438\u0446\u0430 \u041d\u0435\u0441\u0438\u0431\u0435\u043b\u0438, 715",
     "\u0422\u041e\u041e \u00ab{customer.name}\u00bb, {customer.address}",
   );
 
-  // A.3) measurementPlace — the "Өлшеу жүргізу орны" paragraph splits
-  // its text across many runs. Collapse the run sequence that starts
-  // with "ТОО «" and ends with ", 715" into a single placeholder run.
+  // A.3) measurementPlace — run sequence "ТОО «" … ", 715"
   xml = collapseMeasurementPlaceRuns(xml);
 
-  // A.4) Date — original is plain text "«10» апреля 2026 г." (no
-  // MERGEFIELD in this template). Replace via a single <w:t>.
+  // A.4) Date "«10» апреля 2026 г." (plain <w:t>)
   xml = replaceWtExact(
     xml,
     "\u00ab10\u00bb \u0430\u043f\u0440\u0435\u043b\u044f 2026 \u0433.",
     "\u00ab{measurementDate.day}\u00bb {measurementDate.month} {measurementDate.year} \u0433.",
   );
 
-  // A.5) Signature/footer block (paragraphs after the main table).
-  //   - "Исаева А.В."  -> {performer.fullName}
+  // A.5) Signatures
   xml = replaceWtExact(
     xml,
     "\u0418\u0441\u0430\u0435\u0432\u0430 \u0410.\u0412.",
     "{performer.fullName}",
   );
-  //   - "Зертхананың аға маманы" -> single <w:t> Kazakh performer position?
-  // The schema only has performer.position (Russian); we leave the
-  // Kazakh static text untouched to preserve the visual layout and
-  // inject the Russian position by replacing the existing run that
-  // contains "ертхананың аға маманы" (… no, that's Kazakh text). The
-  // original document has, on the LAST paragraph of the performer
-  // line, the Russian fragment split as "Старший с" + "пециалист лабо"
-  // + "ратории". Collapse those three consecutive <w:t> values to a
-  // single placeholder.
   xml = collapsePerformerPositionRussian(xml);
-
-  //   - representative.fullName "Богачев А.И."
   xml = replaceWtExact(
     xml,
     "\u0411\u043e\u0433\u0430\u0447\u0435\u0432 \u0410.\u0418.",
     "{representative.fullName}",
   );
-  //   - representative.position is split: "Начальник по " + "БиОТ".
-  // Replace the first with the placeholder and blank the second.
   xml = replaceWtExact(
     xml,
     "\u041d\u0430\u0447\u0430\u043b\u044c\u043d\u0438\u043a \u043f\u043e ",
@@ -314,24 +339,15 @@ function injectTopLevelPlaceholders(xml) {
   return xml;
 }
 
-/**
- * The "Өлшеу жүргізу орны (место проведения оценки): ТОО «KazEcoFood», …,
- * 715" paragraph fragments the value text across many runs. Find the
- * first run whose <w:t> starts with "ТОО «" AND the run sequence ends
- * with the <w:t>", 715"</w:t>, then collapse that range to a single run
- * carrying the FIRST run's <w:rPr> and the placeholder.
- */
 function collapseMeasurementPlaceRuns(xml) {
   const firstAnchor = '<w:t xml:space="preserve">\u0422\u041e\u041e \u00ab</w:t>';
   let firstIdx = xml.indexOf(firstAnchor);
   if (firstIdx === -1) {
-    // try the variant without xml:space
     const alt = "<w:t>\u0422\u041e\u041e \u00ab</w:t>";
     firstIdx = xml.indexOf(alt);
     if (firstIdx === -1)
       throw new Error("collapseMeasurementPlaceRuns: 'ТОО «' anchor not found");
   }
-  // The run that contains this <w:t> starts a bit before.
   const firstRunStart = xml.lastIndexOf("<w:r>", firstIdx);
   const firstRunStartAttr = xml.lastIndexOf("<w:r ", firstIdx);
   const runStart = Math.max(firstRunStart, firstRunStartAttr);
@@ -342,14 +358,12 @@ function collapseMeasurementPlaceRuns(xml) {
   const rPrMatch = firstRunXml.match(/<w:rPr>[\s\S]*?<\/w:rPr>/);
   const rPr = rPrMatch ? rPrMatch[0] : "";
 
-  // Locate end run: the one containing <w:t...>, 715</w:t>
   const endAnchor1 = '<w:t xml:space="preserve">, 715</w:t>';
   const endAnchor2 = "<w:t>, 715</w:t>";
   let endTextIdx = xml.indexOf(endAnchor1, runStart);
   if (endTextIdx === -1) endTextIdx = xml.indexOf(endAnchor2, runStart);
   if (endTextIdx === -1)
     throw new Error("collapseMeasurementPlaceRuns: ', 715' anchor not found");
-  // End of enclosing run
   const lastRunCloseEnd =
     xml.indexOf("</w:r>", endTextIdx) + "</w:r>".length;
 
@@ -357,12 +371,6 @@ function collapseMeasurementPlaceRuns(xml) {
   return xml.slice(0, runStart) + replacement + xml.slice(lastRunCloseEnd);
 }
 
-/**
- * Collapse the three Russian fragments of the performer position:
- *   "Старший с" + "пециалист лабо" + "ратории"
- * into a single run with {performer.position}, preserving the first
- * fragment's <w:rPr>.
- */
 function collapsePerformerPositionRussian(xml) {
   const firstAnchor1 = '<w:t xml:space="preserve">\u0421\u0442\u0430\u0440\u0448\u0438\u0439 \u0441</w:t>';
   const firstAnchor2 = '<w:t>\u0421\u0442\u0430\u0440\u0448\u0438\u0439 \u0441</w:t>';
@@ -393,106 +401,105 @@ function collapsePerformerPositionRussian(xml) {
   return xml.slice(0, runStart) + replacement + xml.slice(lastRunCloseEnd);
 }
 
-// ---------- B) main table ----------
+// ---------- B) main table — DYNAMIC single section block ----------
 
-/**
- * Templatize the main PPE table:
- *   - section header rows ("1. Администрация..." and "2. Производственный...")
- *     are kept VERBATIM (their bilingual styling is part of the original
- *     visual layout);
- *   - all 13 admin data rows (rows under "1. Администрация...") are
- *     replaced by ONE templated row wrapped with
- *     {#adminRows}...{/adminRows};
- *   - all 18 production data rows (rows under "2. Производственный...")
- *     are replaced by ONE templated row wrapped with
- *     {#productionRows}...{/productionRows}.
- *
- * Cell layouts differ between admin (6 cells, merged norm/issued/cert
- * spans) and production (8 cells, every column distinct), so we use the
- * FIRST data row of each section as the template for that section.
- */
-function templatizeMainTable(xml) {
-  // Locate the two section header rows
-  const adminSecAnchor =
-    "<w:t>1. </w:t>"; // unique enough? probably not — disambiguate by combining with "Администрация"
-  // Instead, find "Администрация" as text fragment.
+function templatizeMainTableDynamic(xml) {
   const adminAnchor = "\u0410\u0434\u043c\u0438\u043d\u0438\u0441\u0442\u0440\u0430\u0446\u0438\u044f"; // "Администрация"
-  // "Производственный" is split as "П" + "роизводственный" in the
-  // original XML. Use the suffix as anchor.
   const prodAnchor = "\u0440\u043e\u0438\u0437\u0432\u043e\u0434\u0441\u0442\u0432\u0435\u043d\u043d\u044b\u0439"; // "роизводственный"
 
   const adminSec = locateRowByAnchor(xml, adminAnchor);
   const prodSec = locateRowByAnchor(xml, prodAnchor, adminSec.end);
 
-  // Find the end of the enclosing <w:tbl> (after prodSec)
   const tblCloseIdx = xml.indexOf("</w:tbl>", prodSec.end);
   if (tblCloseIdx === -1)
     throw new Error("</w:tbl> not found after prod section row");
 
-  // FIRST admin data row sits right after adminSec.end
+  // FIRST ADMIN data row — the 6-<w:tc> variant with gridSpan=3 on
+  // normItems (merges normItems + issuedFact + certificate visually).
+  // Sits right after adminSec.end.
   const adminRowStart = xml.indexOf("<w:tr ", adminSec.end);
   if (adminRowStart === -1 || adminRowStart >= prodSec.start)
     throw new Error("No admin data row found");
   const adminRowEnd = findElementEnd(xml, "w:tr", adminRowStart);
   const adminRowXml = xml.slice(adminRowStart, adminRowEnd);
 
-  // FIRST production data row sits right after prodSec.end
+  // FIRST PRODUCTION data row — the 8-<w:tc> variant. Sits right
+  // after prodSec.end.
   const prodRowStart = xml.indexOf("<w:tr ", prodSec.end);
   if (prodRowStart === -1 || prodRowStart >= tblCloseIdx)
     throw new Error("No production data row found");
   const prodRowEnd = findElementEnd(xml, "w:tr", prodRowStart);
   const prodRowXml = xml.slice(prodRowStart, prodRowEnd);
 
-  // Admin row has 6 cells:
-  //   [code, position(gridSpan=2), count, normItems(gridSpan=3), assessment, note]
-  // Production row has 8 cells:
-  //   [code, position(gridSpan=2), count, normItems, issuedFact, certificate, assessment, note]
+  // ADMIN row: 6 cells. The 4th cell (gridSpan=3) holds normItems and
+  // visually covers what would be norm + issuedFact + certificate in
+  // the prod layout. Open BOTH the inner {#rows} loop AND the
+  // {-w:tr isMerged} row-conditional on the FIRST cell's placeholder
+  // text; close the row-conditional in the LAST cell. The {/rows}
+  // close is emitted on the prod row's last cell so that one inner
+  // iteration covers both candidate rows (only one will survive due
+  // to the mutually exclusive conditionals).
   const ADMIN_PH = [
-    "{code}",
+    "{#rows}{-w:tr isMerged}{code}",
     "{position}",
     "{count}",
     "{normItems}",
     "{assessment}",
-    "{note}",
+    "{note}{/isMerged}",
   ];
+  const adminRowT = templatizeRow(adminRowXml, ADMIN_PH);
+
+  // PROD row: 8 cells.
   const PROD_PH = [
-    "{code}",
+    "{-w:tr isSplit}{code}",
     "{position}",
     "{count}",
     "{normItems}",
     "{issuedFact}",
     "{certificate}",
     "{assessment}",
-    "{note}",
+    "{note}{/isSplit}{/rows}",
   ];
-
-  const adminRowT = templatizeRow(adminRowXml, ADMIN_PH);
   const prodRowT = templatizeRow(prodRowXml, PROD_PH);
 
-  const adminBlock = wrapBlockWithLoop(
-    adminRowT,
-    "{#adminRows}",
-    "{/adminRows}",
-  );
-  const prodBlock = wrapBlockWithLoop(
-    prodRowT,
-    "{#productionRows}",
-    "{/productionRows}",
+  // SECTION HEADER ROW = the admin section row, collapsed into a single
+  // <w:r> carrying {section_header}. The row has one big gridSpan cell
+  // whose text is fragmented across many runs.
+  let sectionHeaderRowXml = xml.slice(adminSec.start, adminSec.end);
+  {
+    const firstWtMatch = sectionHeaderRowXml.match(
+      /<w:t(?:\s[^>]*)?>[^<]*<\/w:t>/,
+    );
+    if (!firstWtMatch) throw new Error("Section header row has no <w:t>");
+    const firstWtFull = firstWtMatch[0];
+    const lastWtClose = sectionHeaderRowXml.lastIndexOf("</w:t>");
+    const lastWtOpen = sectionHeaderRowXml.lastIndexOf("<w:t", lastWtClose);
+    const lastWtFull = sectionHeaderRowXml.slice(
+      lastWtOpen,
+      lastWtClose + "</w:t>".length,
+    );
+    sectionHeaderRowXml = collapseRunRange(
+      sectionHeaderRowXml,
+      firstWtFull,
+      lastWtFull,
+      "{section_header}",
+    );
+  }
+
+  // Outer {#sections} loop wraps section header + both candidate data
+  // rows (admin + prod), bracketed by the inner {#rows}…{/rows} loop
+  // that is embedded inside the row placeholders above.
+  const sectionBlock = wrapBlockWithLoop(
+    sectionHeaderRowXml + adminRowT + prodRowT,
+    "{#sections}",
+    "{/sections}",
   );
 
   // Splice:
-  //   [..adminSec.end]   -> keep
-  //   [adminSec.end..prodSec.start]   -> replace with adminBlock
-  //   [prodSec.start..prodSec.end]   -> keep
-  //   [prodSec.end..tblCloseIdx]   -> replace with prodBlock
-  //   [tblCloseIdx..]   -> keep
-  return (
-    xml.slice(0, adminSec.end) +
-    adminBlock +
-    xml.slice(prodSec.start, prodSec.end) +
-    prodBlock +
-    xml.slice(tblCloseIdx)
-  );
+  //   [..adminSec.start]                            keep (header + col-headers)
+  //   sectionBlock                                  the outer loop
+  //   [tblCloseIdx..]                               keep (</w:tbl> + footer)
+  return xml.slice(0, adminSec.start) + sectionBlock + xml.slice(tblCloseIdx);
 }
 
 main();

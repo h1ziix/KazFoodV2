@@ -1,6 +1,7 @@
 import type {
   SafetyProtocol,
   SafetyRow,
+  SafetySection,
 } from "@/types/safety";
 import {
   renderBlob,
@@ -31,6 +32,40 @@ export function renderSafetyBlob(
   return renderBlob(templateBuffer, buildTemplateContext(data));
 }
 
+/**
+ * Контекст одного раздела. Шаблон safety-protocol.docx содержит ОДИН
+ * блок секции (заголовочная строка + пара LONG/SHORT строк данных),
+ * обёрнутый во внешний цикл {#sections}…{/sections}. Внутри блока пара
+ * строк обёрнута во внутренний цикл {#rows}…{/rows}. См.
+ * scripts/build-safety-template.mjs.
+ *
+ *   {#sections}
+ *     {section_header}
+ *     {#rows}
+ *       {code}|{position}|{count}|{equipment}|{documentation}|
+ *       {result}|{nonComplianceReasons}
+ *       {finalNote}
+ *     {/rows}
+ *   {/sections}
+ *
+ * Заголовок раздела формируется как «{title}», т.к. в исходном DOCX
+ * номер уже входил в title ("1. Административно – управленческий
+ * персонал"). Если title не содержит "<number>." префикса — его добавим
+ * автоматически.
+ */
+function buildSection(s: SafetySection): {
+  section_header: string;
+  rows: Record<string, unknown>[];
+} {
+  const trimmed = s.title.trim();
+  const hasNumberPrefix = /^\d+\.\s*/.test(trimmed);
+  const header = hasNumberPrefix ? trimmed : `${s.number}. ${trimmed}`;
+  return {
+    section_header: header,
+    rows: s.rows.map(mapRow),
+  };
+}
+
 export function buildTemplateContext(
   data: SafetyProtocol,
 ): Record<string, unknown> {
@@ -43,21 +78,9 @@ export function buildTemplateContext(
   });
   rootFlat["measurementPlace"] = data.measurementPlace;
 
-  // The safety template uses a fixed two-section layout:
-  //   sections[0] -> adminMeasurements (rendered before the "2. Производственный..." section row)
-  //   sections[1] -> productionMeasurements (rendered after that section row)
-  // Any extra sections beyond index 1 are appended to productionMeasurements
-  // to avoid data loss.
-  const admin = data.sections[0]?.rows ?? [];
-  const productionRows: SafetyRow[] = [];
-  for (let i = 1; i < data.sections.length; i++) {
-    productionRows.push(...data.sections[i].rows);
-  }
-
   return {
     ...rootFlat,
-    adminMeasurements: admin.map(mapRow),
-    productionMeasurements: productionRows.map(mapRow),
+    sections: data.sections.map(buildSection),
   };
 }
 

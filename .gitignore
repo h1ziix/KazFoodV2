@@ -4,3 +4,11 @@ out/
 .DS_Store
 *.tsbuildinfo
 .env*.local
+
+# Generated test artefacts (produced by scripts/test-*.{js,mjs})
+test-*-output.docx
+test-debug.docx
+
+# Local diagnostic dumps (DOCX unzipped for manual inspection)
+TEMP_UNZIPPED/
+

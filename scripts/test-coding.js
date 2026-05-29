@@ -4,14 +4,13 @@
  *
  * Шаги:
  *   1) пересборка шаблона public/templates/coding-protocol.docx;
- *   2) рендер шаблона на codingExample-эквиваленте (зеркало
- *      src/lib/codingExampleData.ts);
+ *   2) рендер шаблона на тестовом наборе из 5 РАЗДЕЛОВ (для проверки
+ *      динамической поддержки произвольного числа разделов);
  *   3) сохранение в test-coding-output.docx;
  *   4) автопроверки:
  *        – нет "undefined" в финальном XML;
  *        – нет незаменённых тегов { ... };
- *        – derived counts ("13 рабочих мест", "42 рабочих мест",
- *          "Итого: 55") присутствуют ровно так, как ожидается.
+ *        – ВСЕ 5 заголовков разделов и grand_total присутствуют.
  */
 
 const fs = require("fs");
@@ -47,40 +46,42 @@ const example = {
         r("01 001 001", "Директор"),
         r("01 001 002", "Управляющий производством"),
         r("01 001 003", "Бухгалтер"),
-        r("01 001 004", "Коммерческий директор"),
-        r("01 001 005", "Технический директор"),
         r("01 001 006", "Менеджер по продажам", 2),
-        r("01 001 007", "Менеджер по снабжению"),
-        r("01 001 008", "Главный механик"),
-        r("01 001 009", "Главный энергетик"),
-        r("01 001 010", "Специалист по кадровым вопросам"),
-        r("01 001 011", "Начальник службы безопасности"),
-        r("01 001 012", "Специалист по безопасности и охране труда"),
-        r("01 001 013", "Технолог оператор"),
       ],
     },
     {
       number: 2,
       title: "Производственный персонал",
       rows: [
-        r("01 001 014", "Технолог оператор"),
-        r("01 001 015", "Бригадир ремонтно-строительной бригады"),
-        r("01 001 016", "Бригадир технической бригады"),
-        r("01 002 017", "Бригадир цеха выращивания и хранения"),
+        r("01 002 014", "Технолог оператор"),
         r("01 002 018", "Электро слесарь", 3),
         r("01 002 019", "Водитель экспедитор", 3),
-        r("01 003 020", "Лаборант"),
-        r("01 003 021", "Поливщик", 2),
-        r("01 003 022", "Сборщик", 5),
-        r("01 003 023", "Фасовщик", 4),
-        r("01 004 024", "Грузчик", 2),
-        r("01 004 025", "Тракторист"),
-        r("01 004 026", "Разнорабочий", 3),
-        r("01 004 027", "Слесарь"),
-        r("01 004 028", "Сторож", 9),
-        r("01 004 029", "Шеф повар"),
-        r("01 005 030", "Посудомойщица"),
-        r("01 005 031", "Прачка"),
+      ],
+    },
+    {
+      number: 3,
+      title: "Складской персонал",
+      rows: [
+        r("01 003 001", "Заведующий складом"),
+        r("01 003 002", "Кладовщик", 2),
+        r("01 003 003", "Грузчик", 4),
+      ],
+    },
+    {
+      number: 4,
+      title: "Транспортный персонал",
+      rows: [
+        r("01 004 001", "Водитель", 5),
+        r("01 004 002", "Механик автопарка"),
+      ],
+    },
+    {
+      number: 5,
+      title: "Вспомогательный персонал",
+      rows: [
+        r("01 005 001", "Уборщик", 3),
+        r("01 005 002", "Сторож", 4),
+        r("01 005 003", "Дворник"),
       ],
     },
   ],
@@ -115,23 +116,17 @@ function mapRow(rw) {
 }
 
 function buildSection(s) {
-  if (!s) return { header: "", rows: [] };
   return {
-    header: `${s.number}. ${s.title}`,
+    section_header: `${s.number}. ${s.title}`,
     rows: s.rows.map(mapRow),
   };
 }
 
 function buildContext(data) {
   const rootFlat = flatten({ approval: data.approval });
-  const s1 = buildSection(data.sections[0]);
-  const s2 = buildSection(data.sections[1]);
   return {
     ...rootFlat,
-    section1_header: s1.header,
-    section1_rows: s1.rows,
-    section2_header: s2.header,
-    section2_rows: s2.rows,
+    sections: data.sections.map(buildSection),
     grand_total: sumBy(data.sections, (s) => sumBy(s.rows, (rw) => rw.count)),
   };
 }
@@ -196,9 +191,9 @@ function run() {
   console.log("VERIFY: незаменённых шаблонных тегов { ... } не найдено ✅");
 
   // Derived aggregates check
-  const expectAdmin = sumBy(example.sections[0].rows, (rw) => rw.count); // 14
-  const expectProd = sumBy(example.sections[1].rows, (rw) => rw.count); // 42
-  const expectGrand = expectAdmin + expectProd; // 56
+  const expectGrand = sumBy(example.sections, (s) =>
+    sumBy(s.rows, (rw) => rw.count),
+  );
 
   function mustContain(needle) {
     if (xmlText.indexOf(needle) === -1) {
@@ -206,14 +201,35 @@ function run() {
       process.exit(4);
     }
   }
-  // Шаблон зеркалит ORIGINAL DOCX: заголовки секций без " — N рабочих
-  // мест"-суффикса. Это интенциональное визуальное соответствие исходнику.
-  mustContain(`1. Административно – управленческий персонал`);
-  mustContain(`2. Производственный персонал`);
+  function mustNotContain(needle) {
+    if (xmlText.indexOf(needle) !== -1) {
+      console.error(
+        `FAIL: НЕ должен встречаться текст «${needle}» в финальном DOCX`,
+      );
+      process.exit(5);
+    }
+  }
+  // Every section header MUST appear in the rendered DOCX. This is the
+  // core regression assertion: prior to the dynamic refactor only
+  // sections[0] and sections[1] were rendered.
+  for (const s of example.sections) {
+    mustContain(`${s.number}. ${s.title}`);
+  }
+  // grand_total must reflect ALL sections (not just first two).
   mustContain(`Итого: ${expectGrand} р/м`);
+  // Sanity: no leftover hardcoded "1." / "2." literals from the old
+  // template that would indicate stale rows survived the splice.
+  // (The section 1 / 2 titles ARE expected because they're in the data.)
+
+  // Verify each section's data rows actually rendered.
+  for (const s of example.sections) {
+    for (const row of s.rows) {
+      mustContain(row.code);
+    }
+  }
   console.log(
-    `VERIFY: секции и grand_total (${expectGrand}) на месте ✅ ` +
-      `(admin=${expectAdmin}, prod=${expectProd})`,
+    `VERIFY: все ${example.sections.length} разделов отрендерены, ` +
+      `grand_total=${expectGrand} ✅`,
   );
 
   const totalRows = example.sections.reduce((a, s) => a + s.rows.length, 0);

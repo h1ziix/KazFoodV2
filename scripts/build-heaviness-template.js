@@ -899,6 +899,25 @@ const pageBreakP =
   `<w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>` +
   `<w:r><w:br w:type="page"/></w:r></w:p>`;
 
+// -------------------------------------------------------------------------
+// Numbering-list restart sentinels (see tension builder for full rationale).
+// Each <w:numId w:val="N"/> inside the loop body becomes a sentinel so the
+// run-time hook (src/lib/docs/numberingRestart.ts) can clone the matching
+// numbering.xml <w:num> definition per iteration, forcing Word to restart
+// the list counter for every workplace.
+// -------------------------------------------------------------------------
+{
+  let slotK = 0;
+  newBlock = newBlock.replace(
+    /<w:numId\s+w:val="(\d+)"\s*\/>/g,
+    (_m, origId) => {
+      const k = slotK++;
+      return `<w:numId w:val="__NUMID_${origId}_SLOT_${k}__"/>`;
+    },
+  );
+  console.log(`Inserted ${slotK} numId restart sentinels into loop body`);
+}
+
 const newBody =
   bodyHeader +
   loopStartP +

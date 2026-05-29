@@ -1,4 +1,4 @@
-import type { SizProtocol, SizRow } from "@/types/siz";
+import type { SizProtocol, SizRow, SizSection } from "@/types/siz";
 import {
   renderBlob,
   renderDocument,
@@ -26,6 +26,44 @@ export function renderSizBlob(
   return renderBlob(templateBuffer, buildTemplateContext(data));
 }
 
+/**
+ * Контекст одного раздела. Шаблон siz-protocol.docx содержит ОДИН
+ * блок секции (заголовочная строка + ДВЕ кандидатные data-строки),
+ * обёрнутый во внешний цикл {#sections}…{/sections}. Внутри блока
+ * data-строки обёрнуты во внутренний цикл {#rows}…{/rows} и в
+ * взаимоисключающие условия {-w:tr isMerged} (6-cell admin-вариант
+ * с gridSpan=3 на normItems) и {-w:tr ^isMerged} (обычная 8-cell
+ * production-строка). Подробнее: scripts/build-siz-template.js.
+ *
+ *   {#sections}
+ *     {section_header}
+ *     {#rows}
+ *       [-w:tr isMerged]   admin: {code}|{position}|{count}|
+ *                          {normItems(gs=3)}|{assessment}|{note}
+ *       [-w:tr isSplit]    prod : {code}|{position}|{count}|
+ *                          {normItems}|{issuedFact}|{certificate}|
+ *                          {assessment}|{note}
+ *     {/rows}
+ *   {/sections}
+ *
+ * Заголовок раздела формируется как «{title}», если title уже
+ * содержит "N." префикс (в существующем example data так и есть),
+ * иначе — "{number}. {title}". Аналогично generateSafetyDocx и
+ * generateCodingDocx.
+ */
+function buildSection(s: SizSection): {
+  section_header: string;
+  rows: Record<string, unknown>[];
+} {
+  const trimmed = s.title.trim();
+  const hasNumberPrefix = /^\d+\.\s*/.test(trimmed);
+  const header = hasNumberPrefix ? trimmed : `${s.number}. ${trimmed}`;
+  return {
+    section_header: header,
+    rows: s.rows.map(mapRow),
+  };
+}
+
 export function buildTemplateContext(
   data: SizProtocol,
 ): Record<string, unknown> {
@@ -38,30 +76,14 @@ export function buildTemplateContext(
   });
   rootFlat["measurementPlace"] = data.measurementPlace;
 
-  // The СИЗ template uses a fixed two-section layout that mirrors the
-  // original DOCX:
-  //   sections[0] -> adminRows       (rendered between the
-  //                                   "1. Администрация..." section row
-  //                                   and the "2. Производственный..."
-  //                                   section row)
-  //   sections[1] -> productionRows  (rendered after the
-  //                                   "2. Производственный..." row)
-  // Any extra sections beyond index 1 are appended to productionRows
-  // to avoid data loss.
-  const admin = data.sections[0]?.rows ?? [];
-  const productionRows: SizRow[] = [];
-  for (let i = 1; i < data.sections.length; i++) {
-    productionRows.push(...data.sections[i].rows);
-  }
-
   return {
     ...rootFlat,
-    adminRows: admin.map(mapRow),
-    productionRows: productionRows.map(mapRow),
+    sections: data.sections.map(buildSection),
   };
 }
 
 function mapRow(r: SizRow): Record<string, unknown> {
+  const merged = isMergedRow(r);
   return {
     code: r.code,
     position: r.position,
@@ -71,5 +93,28 @@ function mapRow(r: SizRow): Record<string, unknown> {
     certificate: r.certificate,
     assessment: r.assessment,
     note: r.note,
+    /**
+     * Признак «merged-row»: в оригинальном DOCX строки для
+     * административных должностей объединяют 3 колонки
+     * (normItems + issuedFact + certificate) в одну ячейку с
+     * gridSpan=3, в которой целиком умещается длинный текст
+     * «- не предусмотрено, согласно Нормам…». Производственные
+     * строки имеют 8 отдельных колонок.
+     *
+     * Авто-детект: если фактические колонки (issuedFact и
+     * certificate) пустые / «-» / «—» / «–», то рендерим merged-
+     * вариант. Иначе — 8-колоночная split-строка. Флаги
+     * взаимоисключающие и оба используются в шаблоне
+     * (см. scripts/build-siz-template.js, {-w:tr isMerged} /
+     * {-w:tr isSplit}).
+     */
+    isMerged: merged,
+    isSplit: !merged,
   };
+}
+
+const EMPTY_FACT_RE = /^\s*[-\u2013\u2014]?\s*$/;
+
+function isMergedRow(r: SizRow): boolean {
+  return EMPTY_FACT_RE.test(r.issuedFact) && EMPTY_FACT_RE.test(r.certificate);
 }

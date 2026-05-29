@@ -37,23 +37,20 @@ function mapRow(r: CodingRow): Record<string, unknown> {
 }
 
 /**
- * Контекст для одной секции. Шаблон ссылается на:
- *   {section1_header}  — заголовочная строка раздела
- *   {#section1_rows}{code}|{name}|{count}{/section1_rows}
+ * Контекст для одной секции. Шаблон содержит ОДИН блок секции
+ * (заголовочная строка + строка данных), обёрнутый во внешний цикл
+ * {#sections}…{/sections}. Внутри блока:
+ *   {section_header}                                       — заголовок раздела
+ *   {#rows}{code}|{name}|{count}{/rows}                    — строки данных
  * Заголовок совпадает с оригинальным DOCX: "<number>. <title>"
  * (БЕЗ суффикса "— N рабочих мест"; в оригинале его не было).
- *
- * Возвращает плоские ключи (header / rows), которые caller разворачивает
- * в `section1_header` / `section1_rows` / `section2_header` / `section2_rows`.
- * docxtemplater 3.x не интерпретирует точку как путь в стандартной
- * конфигурации, поэтому имена кладутся подчёркиванием (см. flatten.ts).
  */
-function buildSection(
-  s: CodingSection | undefined,
-): { header: string; rows: Record<string, unknown>[] } {
-  if (!s) return { header: "", rows: [] };
+function buildSection(s: CodingSection): {
+  section_header: string;
+  rows: Record<string, unknown>[];
+} {
   return {
-    header: `${s.number}. ${s.title}`,
+    section_header: `${s.number}. ${s.title}`,
     rows: s.rows.map(mapRow),
   };
 }
@@ -62,15 +59,10 @@ export function buildTemplateContext(
   data: CodingProtocol,
 ): Record<string, unknown> {
   const rootFlat = flatten({ approval: data.approval });
-  const s1 = buildSection(data.sections[0]);
-  const s2 = buildSection(data.sections[1]);
 
   return {
     ...rootFlat,
-    section1_header: s1.header,
-    section1_rows: s1.rows,
-    section2_header: s2.header,
-    section2_rows: s2.rows,
+    sections: data.sections.map(buildSection),
     grand_total: sumBy(data.sections, (s) => sumBy(s.rows, (r) => r.count)),
   };
 }

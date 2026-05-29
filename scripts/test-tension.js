@@ -209,6 +209,14 @@ function run() {
     }
     process.exit(1);
   }
+  // Apply the same post-render numbering-restart hook the browser
+  // generator wires through engine.renderBlob. Without this, every
+  // workplace iteration shares the same <w:numId>, so Word's list
+  // counters continue 1..N across all iterations instead of restarting.
+  const {
+    restartListNumberingPerLoop,
+  } = require("../src/lib/docs/numberingRestart.cjs");
+  restartListNumberingPerLoop(doc.getZip());
   const out = doc.getZip().generate({ type: "nodebuffer" });
   fs.writeFileSync(OUT, out);
   console.log(`OK: wrote ${OUT} (${out.length} bytes)`);

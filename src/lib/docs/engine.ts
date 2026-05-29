@@ -54,10 +54,17 @@ export function extractTemplateErrorDetails(err: unknown): string[] {
 /**
  * Pure render of a DOCX template into a Blob. No fetch, no save.
  * Suitable for both browser (ArrayBuffer) and Node (Buffer) callers.
+ *
+ * If `postProcess` is provided, it is invoked with the PizZip instance
+ * AFTER docxtemplater rendering but BEFORE generating the output Blob.
+ * It may mutate any file in the zip (e.g. rewrite numbering.xml or
+ * document.xml) before serialization. Used by tension/heaviness
+ * generators to restart list counters per workplace iteration.
  */
 export function renderBlob(
   templateBuffer: ArrayBuffer | Buffer,
   context: Record<string, unknown>,
+  postProcess?: (zip: PizZip) => void,
 ): Blob {
   const zip = new PizZip(templateBuffer as ArrayBuffer);
   const doc = new Docxtemplater(zip, {
@@ -72,6 +79,27 @@ export function renderBlob(
     throw new TemplateRenderError(
       "Ошибка при рендеринге шаблона DOCX",
       details,
+    );
+  }
+
+  if (postProcess) postProcess(doc.getZip() as PizZip);
+
+  // Defensive guard: build-time __NUMID_<n>_SLOT_<k>__ sentinels must
+  // never reach the saved .docx. They live in w:numId/@w:val, whose
+  // XSD type is ST_DecimalNumber (integer) — Word silently refuses any
+  // document where the attribute is non-numeric ("Word found
+  // unreadable content"). If sentinels survive here it means a caller
+  // forgot to wire postProcess=restartListNumberingPerLoop for a
+  // template that was built with sentinels. Fail loudly instead of
+  // producing a corrupt download.
+  const finalDocXml = doc.getZip().file("word/document.xml")?.asText() ?? "";
+  if (finalDocXml.indexOf("__NUMID_") !== -1) {
+    throw new TemplateRenderError(
+      "Внутренняя ошибка: в сгенерированном документе остались" +
+        " незаменённые маркеры нумерации (__NUMID_…). Документ не" +
+        " откроется в Word. Проверьте, что для данного шаблона" +
+        " зарегистрирован postProcess=restartListNumberingPerLoop.",
+      ["Sentinel __NUMID_ leaked into rendered document.xml"],
     );
   }
 
@@ -96,6 +124,7 @@ export interface RenderDocumentOptions<T> {
   data: T;
   buildContext: (data: T) => Record<string, unknown>;
   filename: (data: T) => string;
+  postProcess?: (zip: PizZip) => void;
 }
 
 /**
@@ -105,6 +134,10 @@ export async function renderDocument<T>(
   opts: RenderDocumentOptions<T>,
 ): Promise<void> {
   const buffer = await fetchTemplate(opts.templateUrl);
-  const blob = renderBlob(buffer, opts.buildContext(opts.data));
+  const blob = renderBlob(
+    buffer,
+    opts.buildContext(opts.data),
+    opts.postProcess,
+  );
   saveAs(blob, opts.filename(opts.data));
 }

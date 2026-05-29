@@ -1,5 +1,7 @@
 import type { z } from "zod";
+import type PizZip from "pizzip";
 import { renderDocument } from "./engine";
+import { restartListNumberingPerLoop } from "./numberingRestart";
 
 // Schemas (single-source-of-truth: per-document zod files)
 import { lightingProtocolSchema } from "@/lib/lightingSchema";
@@ -87,6 +89,21 @@ export interface DocumentDescriptor<TInput> {
   buildContext: (data: TInput) => Record<string, unknown>;
   /** Output filename derived from validated data. */
   filename: (data: TInput) => string;
+  /**
+   * Optional zip post-processor invoked AFTER docxtemplater renders the
+   * template but BEFORE the Blob is serialized. Mirrors the
+   * `postProcess` field on `RenderDocumentOptions`. Used by tension /
+   * heaviness to run `restartListNumberingPerLoop`, which rewrites
+   * build-time `__NUMID_<n>_SLOT_<k>__` sentinels into real integer
+   * numIds and clones <w:num> definitions in numbering.xml so that
+   * Word does not reject the document.
+   *
+   * IMPORTANT: any descriptor whose underlying template was prepared
+   * with build-time sentinels MUST set this field — otherwise sentinels
+   * leak through into the saved .docx and Word refuses to open it
+   * because `w:numId/@w:val` must be a decimal integer.
+   */
+  postProcess?: (zip: PizZip) => void;
 }
 
 /**
@@ -103,6 +120,7 @@ export function renderDescriptor<T>(
     data,
     buildContext: desc.buildContext,
     filename: desc.filename,
+    postProcess: desc.postProcess,
   });
 }
 
@@ -176,6 +194,9 @@ export const DOCUMENT_REGISTRY: DocumentDescriptor<unknown>[] = [
     example: heavinessExample,
     buildContext: heavinessCtx,
     filename: (d) => `Тяжесть_${d.protocol.number}.docx`,
+    // Template carries __NUMID_*_SLOT_*__ sentinels inside the
+    // {#workplaces} loop; must be resolved post-render or Word rejects.
+    postProcess: restartListNumberingPerLoop,
   }),
   describe<TensionProtocol>({
     key: "tension",
@@ -185,6 +206,8 @@ export const DOCUMENT_REGISTRY: DocumentDescriptor<unknown>[] = [
     example: tensionExample,
     buildContext: tensionCtx,
     filename: (d) => `Напряженность_${d.protocol.number}.docx`,
+    // Same sentinel scheme as heaviness — required.
+    postProcess: restartListNumberingPerLoop,
   }),
   describe<SafetyProtocol>({
     key: "safety",

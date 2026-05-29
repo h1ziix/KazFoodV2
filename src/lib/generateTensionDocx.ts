@@ -10,6 +10,7 @@ import {
 } from "./docs/engine";
 import { flatten } from "./docs/flatten";
 import { expandIndicator } from "./docs/indicators";
+import { restartListNumberingPerLoop } from "./docs/numberingRestart";
 
 const TEMPLATE_URL = "/templates/tension-protocol.docx";
 
@@ -23,6 +24,7 @@ export async function generateTensionDocx(
     data,
     buildContext: buildTemplateContext,
     filename: (d) => `Напряженность_${d.protocol.number}.docx`,
+    postProcess: restartListNumberingPerLoop,
   });
 }
 
@@ -34,7 +36,11 @@ export function renderTensionBlob(
   templateBuffer: ArrayBuffer | Buffer,
   data: TensionProtocol,
 ): Blob {
-  return renderBlob(templateBuffer, buildTemplateContext(data));
+  return renderBlob(
+    templateBuffer,
+    buildTemplateContext(data),
+    restartListNumberingPerLoop,
+  );
 }
 
 export function buildTemplateContext(

@@ -10,6 +10,7 @@ import {
 } from "./docs/engine";
 import { flatten } from "./docs/flatten";
 import { expandIndicator } from "./docs/indicators";
+import { restartListNumberingPerLoop } from "./docs/numberingRestart";
 
 const TEMPLATE_URL = "/templates/heaviness-protocol.docx";
 
@@ -23,6 +24,7 @@ export async function generateHeavinessDocx(
     data,
     buildContext: buildTemplateContext,
     filename: (d) => `Тяжесть_${d.protocol.number}.docx`,
+    postProcess: restartListNumberingPerLoop,
   });
 }
 
@@ -34,7 +36,11 @@ export function renderHeavinessBlob(
   templateBuffer: ArrayBuffer | Buffer,
   data: HeavinessProtocol,
 ): Blob {
-  return renderBlob(templateBuffer, buildTemplateContext(data));
+  return renderBlob(
+    templateBuffer,
+    buildTemplateContext(data),
+    restartListNumberingPerLoop,
+  );
 }
 
 export function buildTemplateContext(

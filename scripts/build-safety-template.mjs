@@ -2,13 +2,38 @@
  * Builds public/templates/safety-protocol.docx from the original
  * "12. Травма каз-рус ГОТОВО KazFood.docx" reference document.
  *
- * Strategy mirrors scripts/build-noise-template.mjs:
+ * Strategy mirrors scripts/build-coding-template.js (the canonical fix for
+ * the "только 2 раздела попадают в DOCX" регрессии):
  *   - Use the ORIGINAL DOCX as the structural base.
- *   - Surgically replace inner text of existing <w:t> nodes with placeholders.
- *   - Replace admin pair rows + production pair rows with templated pairs
- *     wrapped in {#adminMeasurements}/{#productionMeasurements} loops.
- *   - Section rows ("1. Административно..." and "2. Производственный...") and
- *     header rows are kept verbatim.
+ *   - Surgically replace inner text of existing <w:t> nodes (вне таблицы)
+ *     с плейсхолдерами.
+ *   - Внутри большой таблицы оставляем заголовочную строку (шапку колонок)
+ *     как есть, а блок «секции» строим из ТРЁХ шаблонных строк:
+ *         1) section_header_row     — однострочный заголовок секции
+ *            (родная "1. Административно..." строка, схлопнутая в один
+ *             <w:r> с {section_header})
+ *         2) LONG row               — первая строка данных, ячейки
+ *            заменены на {code}|{position}|{count}|{equipment}|
+ *            {documentation}|{result}|{nonComplianceReasons}
+ *         3) SHORT row              — вторая строка пары (vMerge cont.),
+ *            5-я ячейка = {finalNote}
+ *     LONG+SHORT обёрнуты во ВНУТРЕННИЙ цикл {#rows}…{/rows}.
+ *     Все три строки целиком обёрнуты во ВНЕШНИЙ цикл
+ *     {#sections}…{/sections}.
+ *   - Все оригинальные строки данных и второй заголовок ("Производственный
+ *     персонал") выбрасываются — их размножает внешний цикл.
+ *
+ * Так получается:
+ *
+ *   {#sections}
+ *     [заголовок раздела]
+ *     {#rows}
+ *       [LONG строка]
+ *       [SHORT строка]
+ *     {/rows}
+ *   {/sections}
+ *
+ * Run:  node scripts/build-safety-template.mjs
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
@@ -19,7 +44,7 @@ import PizZip from "pizzip";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
 
-// ---------- helpers ----------
+// ---------- generic XML helpers ----------
 
 function findElementEnd(xml, tag, openIdx) {
   const openRe = new RegExp(`<${tag}(?:\\s|>|/>)`, "g");
@@ -71,8 +96,8 @@ function replaceWtExact(xml, oldText, newText) {
   return xml.replace(m[0], `<w:t${attrs}>${newText}</w:t>`);
 }
 
-function locateRowByAnchor(xml, anchor) {
-  const ai = xml.indexOf(anchor);
+function locateRowByAnchor(xml, anchor, fromIdx = 0) {
+  const ai = xml.indexOf(anchor, fromIdx);
   if (ai === -1) throw new Error(`Anchor not found: ${anchor.slice(0, 80)}`);
   const start = xml.lastIndexOf("<w:tr ", ai);
   if (start === -1) throw new Error("<w:tr> before anchor not found");
@@ -144,6 +169,12 @@ function templatizeRow(rowXml, placeholders) {
   return out;
 }
 
+/**
+ * Inject `{#tag}` right after the FIRST <w:t> opening and `{/tag}` just
+ * before the LAST </w:t> closing inside `blockXml`. paragraphLoop:true
+ * makes docxtemplater treat each enclosing <w:tr> as the loop body and
+ * replicate every whole row of the block per item.
+ */
 function wrapBlockWithLoop(blockXml, openTag, closeTag) {
   const tRe = /<w:t(?:\s[^>]*)?>/g;
   const m = tRe.exec(blockXml);
@@ -154,6 +185,41 @@ function wrapBlockWithLoop(blockXml, openTag, closeTag) {
   const lastClose = out.lastIndexOf("</w:t>");
   out = out.slice(0, lastClose) + closeTag + out.slice(lastClose);
   return out;
+}
+
+/**
+ * Collapse run sequence between two <w:t> anchors (within `xml`) into a
+ * single <w:r> that keeps the FIRST run's <w:rPr> and carries the
+ * placeholder. Mirrors collapseRunRange from build-coding-template.js.
+ */
+function collapseRunRange(xml, startWtTag, endWtTag, placeholder) {
+  const startTextIdx = xml.indexOf(startWtTag);
+  if (startTextIdx === -1)
+    throw new Error(
+      `collapseRunRange: start anchor not found: ${startWtTag.slice(0, 80)}`,
+    );
+  const runStartA = xml.lastIndexOf("<w:r>", startTextIdx);
+  const runStartB = xml.lastIndexOf("<w:r ", startTextIdx);
+  const runStart = Math.max(runStartA, runStartB);
+  if (runStart === -1)
+    throw new Error("collapseRunRange: enclosing <w:r> not found");
+  const firstRunEnd = findElementEnd(xml, "w:r", runStart);
+  const firstRunXml = xml.slice(runStart, firstRunEnd);
+  const rPrMatch = firstRunXml.match(/<w:rPr>[\s\S]*?<\/w:rPr>/);
+  const rPr = rPrMatch ? rPrMatch[0] : "";
+
+  const endTextIdx = xml.indexOf(endWtTag, runStart);
+  if (endTextIdx === -1)
+    throw new Error(
+      `collapseRunRange: end anchor not found: ${endWtTag.slice(0, 80)}`,
+    );
+  const lastRunCloseEnd =
+    xml.indexOf("</w:r>", endTextIdx) + "</w:r>".length;
+  if (lastRunCloseEnd < endTextIdx)
+    throw new Error("collapseRunRange: </w:r> after end anchor not found");
+
+  const replacement = `<w:r>${rPr}<w:t xml:space="preserve">${placeholder}</w:t></w:r>`;
+  return xml.slice(0, runStart) + replacement + xml.slice(lastRunCloseEnd);
 }
 
 // ---------- main ----------
@@ -175,8 +241,9 @@ function main() {
   // ===== A) Top-level text placeholders OUTSIDE the big table =====
   xml = injectTopLevelPlaceholders(xml);
 
-  // ===== B) Templatize big table: replace admin pairs + production pairs =====
-  xml = templatizeBigTable(xml);
+  // ===== B) Replace fixed two-section layout with a single
+  //          {#sections}{#rows}…{/rows}{/sections} block. =====
+  xml = templatizeBigTableDynamic(xml);
 
   // Persist
   zip.file("word/document.xml", xml);
@@ -194,48 +261,38 @@ function main() {
   console.log(`  document.xml size: ${xml.length} bytes`);
 }
 
-// ---------- A) top-level injection ----------
+// ---------- A) top-level injection (без изменений) ----------
 
 function injectTopLevelPlaceholders(xml) {
-  // A.1) Protocol number "№1" — original is one <w:t xml:space="preserve"> №1</w:t>
   xml = replaceWtExact(xml, " \u21161", " \u2116{protocol.number}");
 
-  // A.2) Customer name + address (single <w:t>)
   xml = replaceWtExact(
     xml,
     "\u0422\u041e\u041e \u00abKazEcoFood\u00bb, \u0410\u043b\u043c\u0430\u043d\u0438\u0441\u043a\u0430\u044f \u043e\u0431\u043b, \u041a\u0430\u0440\u0430\u0441\u0430\u0439\u0441\u043a\u0438\u0439 \u0440\u0430\u0439\u043e\u043d, \u0441\u0435\u043b\u043e \u041a\u043e\u043a\u043e\u0437\u0435\u043a, \u0443\u043b\u0438\u0446\u0430 \u041d\u0435\u0441\u0438\u0431\u0435\u043b\u0438, 715",
     "\u0422\u041e\u041e \u00ab{customer.name}\u00bb, {customer.address}",
   );
 
-  // A.3) measurementPlace
   xml = replaceWtExact(
     xml,
     "1. \u0410\u0434\u043c\u0438\u043d\u0438\u0441\u0442\u0440\u0430\u0442\u0438\u0432\u043d\u043e \u2013 \u0443\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0447\u0435\u0441\u043a\u0438\u0439 \u043f\u0435\u0440\u0441\u043e\u043d\u0430\u043b,  2. \u041f\u0440\u043e\u0438\u0437\u0432\u043e\u0434\u0441\u0442\u0432\u0435\u043d\u043d\u044b\u0439 \u043f\u0435\u0440\u0441\u043e\u043d\u0430\u043b",
     "{measurementPlace}",
   );
 
-  // A.4) MERGEFIELD date — collapse fldChar begin…end into a single run with
-  //      placeholder. Display text inside is «10» апреля 2026 г. (line 1150).
+  // MERGEFIELD date collapse
   {
     const beginAnchor = "<w:instrText xml:space=\"preserve\"> MERGEFIELD \u0414\u0430\u0442\u0430_\u043f\u0440\u043e\u0432\u0435\u0434\u0435\u043d\u0438\u044f </w:instrText>";
     const beginIdx = xml.indexOf(beginAnchor);
     if (beginIdx === -1) throw new Error("MERGEFIELD instrText not found");
-    // The fldChar begin <w:r>...</w:r> precedes this. Walk back to find <w:r ... fldChar="begin">
-    // Easier: find the enclosing <w:r ...> that contains <w:fldChar w:fldCharType="begin"/>
-    // by searching backwards.
     const fldBeginMarker = '<w:fldChar w:fldCharType="begin"/>';
     const fldBeginIdx = xml.lastIndexOf(fldBeginMarker, beginIdx);
     if (fldBeginIdx === -1) throw new Error("fldChar begin not found");
     const firstRunStart = xml.lastIndexOf("<w:r ", fldBeginIdx);
     if (firstRunStart === -1) throw new Error("first run for fldChar begin not found");
-    // Find fldChar end marker AFTER beginIdx
     const fldEndMarker = '<w:fldChar w:fldCharType="end"/>';
     const fldEndIdx = xml.indexOf(fldEndMarker, beginIdx);
     if (fldEndIdx === -1) throw new Error("fldChar end not found");
-    // Find end of containing <w:r>
     const lastRunEnd =
       xml.indexOf("</w:r>", fldEndIdx) + "</w:r>".length;
-    // Extract <w:rPr> from the FIRST run for fidelity
     const firstRunEnd = findElementEnd(xml, "w:r", firstRunStart);
     const firstRunXml = xml.slice(firstRunStart, firstRunEnd);
     const rPrMatch = firstRunXml.match(/<w:rPr>[\s\S]*?<\/w:rPr>/);
@@ -244,23 +301,14 @@ function injectTopLevelPlaceholders(xml) {
     xml = xml.slice(0, firstRunStart) + replacement + xml.slice(lastRunEnd);
   }
 
-  // A.5) Signatures (footer, after the big table)
-  //  - "Исаева А.В." — performer.fullName (single <w:t>)
+  // Signatures
   xml = replaceWtExact(xml, "\u0418\u0441\u0430\u0435\u0432\u0430 \u0410.\u0412.", "{performer.fullName}");
-  //  - "Специалист лаборатории" — performer.position
   xml = replaceWtExact(
     xml,
     "\u043f\u0435\u0446\u0438\u0430\u043b\u0438\u0441\u0442 \u043b\u0430\u0431\u043e\u0440\u0430\u0442\u043e\u0440\u0438\u0438",
     "{performer.position}",
   );
-  //  - "Богачев А.И." — representative.fullName
   xml = replaceWtExact(xml, "\u0411\u043e\u0433\u0430\u0447\u0435\u0432 \u0410.\u0418.", "{representative.fullName}");
-  //  - "Начальник по " (note trailing space, then "БиОТ" in next run). The
-  //    Russian text is split: "Начальник по " + "БиОТ". Collapse by
-  //    replacing just the "Начальник по " <w:t> with {representative.position}
-  //    and removing the "БиОТ" <w:t>. To stay strictly text-only and avoid
-  //    structural changes, replace "Начальник по " with placeholder and
-  //    blank "БиОТ".
   xml = replaceWtExact(
     xml,
     "\u041d\u0430\u0447\u0430\u043b\u044c\u043d\u0438\u043a \u043f\u043e ",
@@ -271,19 +319,15 @@ function injectTopLevelPlaceholders(xml) {
   return xml;
 }
 
-// ---------- B) big table ----------
+// ---------- B) big table — DYNAMIC single section block ----------
 
-function templatizeBigTable(xml) {
-  // Anchors for the two section rows
+function templatizeBigTableDynamic(xml) {
+  // Anchors for the two original section header rows.
   const adminSectionAnchor =
     "<w:t>1. \u0410\u0434\u043c\u0438\u043d\u0438\u0441\u0442\u0440\u0430\u0442\u0438\u0432\u043d\u043e \u2013 \u0443\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0447\u0435\u0441\u043a\u0438\u0439 \u043f\u0435\u0440\u0441\u043e\u043d\u0430\u043b</w:t>";
   const prodSectionAnchor =
     "<w:t>\u041f\u0440\u043e\u0438\u0437\u0432\u043e\u0434\u0441\u0442\u0432\u0435\u043d\u043d\u044b\u0439 \u043f\u0435\u0440\u0441\u043e\u043d\u0430\u043b</w:t>";
 
-  // The "Административно" section header row spans cells with broken text;
-  // the anchor above might not be unique. Use a uniqueness-guaranteeing
-  // longer fragment that includes "Административно" + " – управленческий".
-  // Fall back: locate via "Административно" then walk back to <w:tr.
   let adminSec;
   try {
     adminSec = locateRowByAnchor(xml, adminSectionAnchor);
@@ -293,15 +337,13 @@ function templatizeBigTable(xml) {
       "<w:t>\u0410\u0434\u043c\u0438\u043d\u0438\u0441\u0442\u0440\u0430\u0442\u0438\u0432\u043d\u043e</w:t>",
     );
   }
-
   const prodSec = locateRowByAnchor(xml, prodSectionAnchor, adminSec.end);
 
-  // Big table boundary
-  // The big table is the SECOND <w:tbl>. Find </w:tbl> after prodSec.end.
   const tblCloseIdx = xml.indexOf("</w:tbl>", prodSec.end);
-  if (tblCloseIdx === -1) throw new Error("</w:tbl> not found after prod section");
+  if (tblCloseIdx === -1)
+    throw new Error("</w:tbl> not found after prod section");
 
-  // Find FIRST admin data row pair (LONG then SHORT) right after adminSec.end
+  // First admin pair (LONG + SHORT) right after the admin section row.
   const adminLongStart = xml.indexOf("<w:tr ", adminSec.end);
   if (adminLongStart === -1 || adminLongStart >= prodSec.start)
     throw new Error("No admin LONG row found");
@@ -314,24 +356,7 @@ function templatizeBigTable(xml) {
   const adminLongRow = xml.slice(adminLongStart, adminLongEnd);
   const adminShortRow = xml.slice(adminShortStart, adminShortEnd);
 
-  // Same for production
-  const prodLongStart = xml.indexOf("<w:tr ", prodSec.end);
-  if (prodLongStart === -1 || prodLongStart >= tblCloseIdx)
-    throw new Error("No prod LONG row found");
-  const prodLongEnd = findElementEnd(xml, "w:tr", prodLongStart);
-  const prodShortStart = xml.indexOf("<w:tr ", prodLongEnd);
-  if (prodShortStart === -1 || prodShortStart >= tblCloseIdx)
-    throw new Error("No prod SHORT row found");
-  const prodShortEnd = findElementEnd(xml, "w:tr", prodShortStart);
-
-  const prodLongRow = xml.slice(prodLongStart, prodLongEnd);
-  const prodShortRow = xml.slice(prodShortStart, prodShortEnd);
-
-  // 7 cells. LONG row placeholders:
-  //   [code, position, count, equipment, documentation, result, nonComplianceReasons]
-  // SHORT row placeholders:
-  //   [null, null, null, null, finalNote, null, null]
-  // (only cell 4 has text; others are vMerge continuation with empty <w:p>)
+  // 7 cells.
   const LONG_PH = [
     "{code}",
     "{position}",
@@ -343,31 +368,45 @@ function templatizeBigTable(xml) {
   ];
   const SHORT_PH = [null, null, null, null, "{finalNote}", null, null];
 
-  const adminLongT = templatizeRow(adminLongRow, LONG_PH);
-  const adminShortT = templatizeRow(adminShortRow, SHORT_PH);
-  const prodLongT = templatizeRow(prodLongRow, LONG_PH);
-  const prodShortT = templatizeRow(prodShortRow, SHORT_PH);
+  const longT = templatizeRow(adminLongRow, LONG_PH);
+  const shortT = templatizeRow(adminShortRow, SHORT_PH);
 
-  // Build per-section block: pair = LONG + SHORT; wrap pair with loop.
-  const adminBlock = wrapBlockWithLoop(
-    adminLongT + adminShortT,
-    "{#adminMeasurements}",
-    "{/adminMeasurements}",
-  );
-  const prodBlock = wrapBlockWithLoop(
-    prodLongT + prodShortT,
-    "{#productionMeasurements}",
-    "{/productionMeasurements}",
+  // Inner {#rows} loop wraps the LONG+SHORT pair.
+  const rowsBlock = wrapBlockWithLoop(longT + shortT, "{#rows}", "{/rows}");
+
+  // Templatize the admin section header row: collapse its multi-run text
+  // (которая фактически содержит "1. Административно – управленческий
+  // персонал", фрагментированно) в один <w:r> с {section_header}.
+  let sectionHeaderRowXml = xml.slice(adminSec.start, adminSec.end);
+  {
+    const firstWtMatch = sectionHeaderRowXml.match(/<w:t(?:\s[^>]*)?>[^<]*<\/w:t>/);
+    if (!firstWtMatch) throw new Error("Section header row has no <w:t>");
+    const firstWtFull = firstWtMatch[0];
+    const lastWtClose = sectionHeaderRowXml.lastIndexOf("</w:t>");
+    const lastWtOpen = sectionHeaderRowXml.lastIndexOf("<w:t", lastWtClose);
+    const lastWtFull = sectionHeaderRowXml.slice(
+      lastWtOpen,
+      lastWtClose + "</w:t>".length,
+    );
+    sectionHeaderRowXml = collapseRunRange(
+      sectionHeaderRowXml,
+      firstWtFull,
+      lastWtFull,
+      "{section_header}",
+    );
+  }
+
+  // Outer {#sections} loop wraps the templatized header row + the rows block.
+  const sectionBlock = wrapBlockWithLoop(
+    sectionHeaderRowXml + rowsBlock,
+    "{#sections}",
+    "{/sections}",
   );
 
-  // Replace admin range (adminSec.end → prodSec.start) with adminBlock
-  // and prod range (prodSec.end → tblCloseIdx) with prodBlock.
+  // Splice: keep everything up to adminSec.start, then sectionBlock,
+  // then drop all original section/data rows up to </w:tbl>.
   const newXml =
-    xml.slice(0, adminSec.end) +
-    adminBlock +
-    xml.slice(prodSec.start, prodSec.end) +
-    prodBlock +
-    xml.slice(tblCloseIdx);
+    xml.slice(0, adminSec.start) + sectionBlock + xml.slice(tblCloseIdx);
   return newXml;
 }
 

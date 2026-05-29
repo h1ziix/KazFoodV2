@@ -60,7 +60,7 @@ const example = {
   },
   customer: {
     name: "ТОО «KazEcoFood»",
-    address: "Алманиская обл, Карасайский район, село Кокозек, улица Несибели, 715",
+    address: "Алматы қ., Түрксіб ауданы, Остроумов көш., 50А үй",
   },
   measurementDate: { day: "10", month: "апреля", year: "2026" },
   workplaces: [
@@ -157,6 +157,14 @@ function run() {
     }
     process.exit(1);
   }
+  // Apply the same post-render numbering-restart hook the browser
+  // generator wires through engine.renderBlob. Without this, every
+  // workplace iteration shares the same <w:numId>, so Word's list
+  // counters continue 1..N across all iterations instead of restarting.
+  const {
+    restartListNumberingPerLoop,
+  } = require("../src/lib/docs/numberingRestart.cjs");
+  restartListNumberingPerLoop(doc.getZip());
   const out = doc.getZip().generate({ type: "nodebuffer" });
   fs.writeFileSync(OUT, out);
   console.log(`OK: wrote ${OUT} (${out.length} bytes)`);

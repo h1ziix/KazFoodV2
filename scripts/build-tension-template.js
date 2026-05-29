@@ -918,6 +918,31 @@ const pageBreakP =
   `<w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>` +
   `<w:r><w:br w:type="page"/></w:r></w:p>`;
 
+// -------------------------------------------------------------------------
+// Numbering-list restart sentinels.
+// Every <w:numId w:val="N"/> inside the loop body refers to a Word list
+// instance whose counter would otherwise CONTINUE across iterations (since
+// docxtemplater simply duplicates the same XML). To force per-workplace
+// restart we rewrite each reference into a sentinel that the run-time
+// hook (src/lib/docs/numberingRestart.ts → restartListNumberingPerLoop)
+// expands back into either the ORIGINAL numId (first iteration) or a
+// freshly cloned numId pointing at the same abstractNumId (iterations
+// 2..N). Slot index K is assigned per unique reference position inside
+// the loop body so that the run-time hook can group occurrences by slot.
+// We process ONLY references inside `newBlock` (the loop body), not in
+// `loopStartP`/`loopEndP`/`pageBreakP`/`sectPrXml`/`bodyHeader`.
+{
+  let slotK = 0;
+  newBlock = newBlock.replace(
+    /<w:numId\s+w:val="(\d+)"\s*\/>/g,
+    (_m, origId) => {
+      const k = slotK++;
+      return `<w:numId w:val="__NUMID_${origId}_SLOT_${k}__"/>`;
+    },
+  );
+  console.log(`Inserted ${slotK} numId restart sentinels into loop body`);
+}
+
 const newBody =
   bodyHeader +
   loopStartP +

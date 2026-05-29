@@ -62,8 +62,7 @@ export const heavinessExample: HeavinessProtocol = {
   },
   customer: {
     name: "ТОО «KazEcoFood»",
-    address:
-      "Алманиская обл, Карасайский район, село Кокозек, улица Несибели, 715",
+    address: "Алматы қ., Түрксіб ауданы, Остроумов көш., 50А үй",
   },
   measurementDate: {
     day: "10",
