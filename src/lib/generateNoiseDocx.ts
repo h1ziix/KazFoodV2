@@ -74,7 +74,7 @@ function flattenMeasurement(
     charTonalNonStationary: measurement.character.tonalNonStationary,
     charTonalOscillating: measurement.character.tonalOscillating,
     charTonalImpulse: measurement.character.tonalImpulse,
-    measured: measurement.measured,
+    measured: `LAэкв ${measurement.measured}`,
     allowed: measurement.allowed,
   };
 }

@@ -1,15 +1,8 @@
 /**
  * scripts/test-emp.js
  *
- * Render the EMP protocol template with sample data and verify:
- *   - the new section row "1. Административно – управленческий
- *     персонал" appears exactly once,
- *   - the fixed "Диапазон 1" / "Диапазон 2" labels are present
- *     (instead of the previous frequency text like "5 Гц – 2 кГц"),
- *   - no unresolved {#…}/{/…} tokens remain,
- *   - the table count is unchanged (still 2),
- *   - per-iteration the loop still emits 3 <w:tr> blocks, plus the
- *     extra static section row, with no column drift.
+ * Render the EMP protocol template with multi-place sample data and
+ * verify dynamic section rows appear via the {-w:tr showPlace} pattern.
  *
  *   node scripts/test-emp.js          # dry-run template
  *   node scripts/test-emp.js --live   # real template
@@ -24,12 +17,7 @@ const Docxtemplater = require("docxtemplater");
 
 const ROOT = path.resolve(__dirname, "..");
 const TEMPLATE_LIVE = path.join(ROOT, "public", "templates", "emp-protocol.docx");
-const TEMPLATE_DRY = path.join(
-  ROOT,
-  "public",
-  "templates",
-  "emp-protocol.dryrun.docx",
-);
+const TEMPLATE_DRY = path.join(ROOT, "public", "templates", "emp-protocol.dryrun.docx");
 const OUT = path.join(ROOT, "test-emp-output.docx");
 
 function makeMeas(rowNumber, pointNumber, place) {
@@ -37,7 +25,6 @@ function makeMeas(rowNumber, pointNumber, place) {
     rowNumber,
     pointNumber,
     place,
-    // The template ignores Name; Label is supplied separately.
     range1Label: "Диапазон 1",
     range1Name: "5 Гц – 2 кГц",
     range1Distance: "0,5",
@@ -59,6 +46,40 @@ function makeMeas(rowNumber, pointNumber, place) {
   };
 }
 
+const places = [
+  {
+    number: 1,
+    name: "Административно – управленческий персонал",
+    measurements: [
+      makeMeas(1, "1т", "Кабинет директора"),
+      makeMeas(2, "2т", "Бухгалтерия"),
+      makeMeas(3, "3т", "Архив"),
+    ],
+  },
+  {
+    number: 2,
+    name: "Производственный персонал",
+    measurements: [
+      makeMeas(4, "4т", "Цех №1"),
+    ],
+  },
+];
+
+// Build the flat measurements array the same way generateEmpDocx.ts does.
+const measurements = [];
+for (const place of places) {
+  place.measurements.forEach((meas, i) => {
+    measurements.push({
+      ...meas,
+      showPlace: i === 0,
+      placeNumber: place.number,
+      placeName: place.name,
+    });
+  });
+}
+
+const placesList = places.map((p) => `${p.number}. ${p.name}`).join(", ");
+
 const data = {
   "protocol.number": "TEST-EMP-001",
   "protocol.year": "2026",
@@ -70,16 +91,14 @@ const data = {
   "measurementDate.day": "25",
   "measurementDate.month": "мая",
   "measurementDate.year": "2026",
-  purpose: "Тест section row + Диапазон",
+  purpose: "Тест dynamic section rows + Диапазон",
   methodologyStandard: "МУК 4.3.045-96",
   productStandard: "Приказ МЗ РК",
   representative: "Иванов И.И.",
-  placesList: "1. Кабинет директора, 2. Бухгалтерия",
-  emp_measurements: [
-    makeMeas(1, "1т", "Кабинет директора"),
-    makeMeas(2, "2т", "Бухгалтерия"),
-    makeMeas(3, "3т", "Архив"),
-  ],
+  placesList,
+  measurements,
+  // Backward-compat: older templates used {#emp_measurements}.
+  emp_measurements: measurements,
   "performer.fullName": "Тестов Т.Т.",
   "performer.position": "Инженер",
   "director.fullName": "Директоров Д.Д.",
@@ -117,39 +136,44 @@ function run() {
 
   const verifyZip = new PizZip(out);
   const xml = verifyZip.file("word/document.xml").asText();
-  const sectionHits = (xml.match(/1\. Административно/g) || []).length;
+
+  const adminHits = (xml.match(/Административно/g) || []).length;
+  const prodHits = (xml.match(/Производственный персонал/g) || []).length;
   const d1Hits = (xml.match(/Диапазон 1/g) || []).length;
   const d2Hits = (xml.match(/Диапазон 2/g) || []).length;
-  const freqOld = (xml.match(/5 Гц – 2 кГц/g) || []).length;
   const tblCount = (xml.match(/<w:tbl>/g) || []).length;
   const trCount = (xml.match(/<w:tr[ >]/g) || []).length;
-  const placeHits = (xml.match(/Кабинет директора/g) || []).length;
+  const firstRow = (xml.match(/Кабинет директора/g) || []).length;
   const leftover = xml.includes("{#") || xml.includes("{/");
 
-  console.log("--- VERIFY ---");
-  console.log("tables               :", tblCount);
-  console.log("total <w:tr>         :", trCount);
-  console.log("'Административно' row:", sectionHits);
-  console.log("'Диапазон 1'         :", d1Hits);
-  console.log("'Диапазон 2'         :", d2Hits);
-  console.log("old frequency text   :", freqOld);
-  console.log("'Кабинет директора'  :", placeHits);
-  console.log("unresolved {#…}/{/…} :", leftover);
+  // 2 places × 1 section row each = 2 section rows.
+  // 4 measurements × 3 rows-per-measurement = 12 data rows.
+  // + 4 header rows in the EMP table + 1 row in table 1 = 19 total.
+  const expectedTr = 19;
+  // Each place name appears once in placesList and once in its section row → 2 hits each.
+  // "Кабинет директора" is the {place} of measurement 1 — appears only in the data row (1 hit).
 
-  // Expected rows in table 2: original 4 header rows + 1 section row
-  //  + 3 measurements × 3 rows-per-iteration = 14
-  // Table 1 contributes 1 row.
-  // Total = 15.
-  const expected =
+  console.log("--- VERIFY ---");
+  console.log("tables:", tblCount);
+  console.log("rows  :", trCount, `(expected ${expectedTr})`);
+  console.log("'Административно' section:", adminHits, "(expected 2)");
+  console.log("'Производственный персонал' section:", prodHits, "(expected 2)");
+  console.log("'Диапазон 1':", d1Hits, "(expected 4)");
+  console.log("'Диапазон 2':", d2Hits, "(expected 4)");
+  console.log("'Кабинет директора':", firstRow, "(expected 1)");
+  console.log("unresolved {#…}/{/…} markers:", leftover);
+
+  const ok =
     tblCount === 2 &&
-    sectionHits === 1 &&
-    d1Hits === 3 &&
-    d2Hits === 3 &&
-    freqOld === 0 &&
-    placeHits === 2 &&
+    adminHits === 2 &&
+    prodHits === 2 &&
+    d1Hits === 4 &&
+    d2Hits === 4 &&
+    firstRow === 1 &&
     !leftover &&
-    trCount === 15;
-  if (!expected) {
+    trCount === expectedTr;
+
+  if (!ok) {
     console.error("FAIL: structural expectations not met.");
     process.exit(2);
   }

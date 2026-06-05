@@ -2,6 +2,8 @@ import type { z } from "zod";
 import type PizZip from "pizzip";
 import { renderDocument } from "./engine";
 import { restartListNumberingPerLoop } from "./numberingRestart";
+import { injectCommonData } from "./commonDataInjector";
+import type { CommonData } from "@/types/common";
 
 // Schemas (single-source-of-truth: per-document zod files)
 import { lightingProtocolSchema } from "@/lib/lightingSchema";
@@ -104,21 +106,36 @@ export interface DocumentDescriptor<TInput> {
    * because `w:numId/@w:val` must be a decimal integer.
    */
   postProcess?: (zip: PizZip) => void;
+  /**
+   * Field keys hidden from the form UI.  The fields remain in the data
+   * model, in schema validation, and in DOCX generation — they are only
+   * excluded from `buildFormDescriptor` rendering.  Pre-filled via zod
+   * `.default(…)` so newly added array rows arrive with correct values.
+   *
+   * Used by the Noise protocol to hide octave bands, character flags,
+   * and other columns the user fills directly in the DOCX.
+   */
+  formSkipKeys?: readonly string[];
 }
 
 /**
  * Convenience renderer that closes over a descriptor.  Equivalent to
  * the per-document generate<Name>Docx() functions: fetches the
  * template, renders, triggers a download via file-saver.
+ *
+ * When `commonData` is provided, its values are injected into the
+ * template context for every key that is absent or empty in the
+ * document-specific context.  Document values always take priority.
  */
 export function renderDescriptor<T>(
   desc: DocumentDescriptor<T>,
   data: T,
+  commonData?: CommonData | null,
 ): Promise<void> {
   return renderDocument({
     templateUrl: desc.templateUrl,
     data,
-    buildContext: desc.buildContext,
+    buildContext: (d) => injectCommonData(desc.buildContext(d), commonData),
     filename: desc.filename,
     postProcess: desc.postProcess,
   });
@@ -185,6 +202,17 @@ export const DOCUMENT_REGISTRY: DocumentDescriptor<unknown>[] = [
     example: noiseExample,
     buildContext: noiseCtx,
     filename: (d) => `Шум_${d.protocol.number}.docx`,
+    // Hide measurement detail fields the user fills directly in the DOCX.
+    // All hidden fields remain in the data and are passed to the generator.
+    formSkipKeys: [
+      "octaves",
+      "character",
+      "time",
+      "ppePresent",
+      "ppeAbsent",
+      "sourceStationary",
+      "sourceNonStationary",
+    ],
   }),
   describe<HeavinessProtocol>({
     key: "heaviness",

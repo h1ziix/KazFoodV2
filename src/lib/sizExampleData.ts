@@ -83,12 +83,10 @@ const productionSection: SizSection = {
 export const sizExample: SizProtocol = {
   protocol: { number: "1" },
   customer: {
-    name: "ТОО «KazEcoFood»",
-    address:
-      "Алманиская обл, Карасайский район, село Кокозек, улица Несибели, 715",
+    name: "",
+    address: "",
   },
-  measurementPlace:
-    "ТОО «KazEcoFood», Алманиская обл, Карасайский район, село Кокозек, улица Несибели, 715",
+  measurementPlace: "",
   measurementDate: {
     day: "10",
     month: "апреля",
@@ -96,8 +94,8 @@ export const sizExample: SizProtocol = {
   },
   sections: [adminSection, productionSection],
   performer: {
-    fullName: "Исаева А.В.",
-    position: "Старший специалист лаборатории",
+    fullName: "",
+    position: "",
   },
   representative: {
     fullName: "Богачев А.И.",

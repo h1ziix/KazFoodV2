@@ -1,14 +1,9 @@
 /**
  * scripts/test-lighting.js
  *
- * Render the lighting protocol DOCX template with a multi-section
- * example set (admin rows 1т…13т, then production rows 14т…16т) and
- * verify that the two section-divider rows from the reference DOCX are
- * present exactly once in the rendered output.
- *
- * By default this renders against the DRY-RUN template produced by
- * build-lighting-template.js (without --apply). Pass --live to render
- * against the real public/templates/lighting-protocol.docx instead.
+ * Render the lighting protocol DOCX template with a multi-place
+ * example set and verify that section divider rows appear dynamically
+ * for each place (using the {-w:tr showPlace} Meteo-style pattern).
  *
  *   node scripts/test-lighting.js          # dry-run template
  *   node scripts/test-lighting.js --live   # real template
@@ -26,53 +21,79 @@ const TEMPLATE_LIVE = path.join(ROOT, "public", "templates", "lighting-protocol.
 const TEMPLATE_DRY = path.join(ROOT, "public", "templates", "lighting-protocol.dryrun.docx");
 const OUT = path.join(ROOT, "test-lighting-output.docx");
 
-function makeRow(rowNumber, pointNumber, place) {
+function makeRow(rowNumber, pointNumber, place, workCategory, measured, allowed) {
   return {
     rowNumber,
     pointNumber,
     place,
-    workCategory: "А-1",
-    lightingSystem: "Искусственное общее",
-    lightingType: "Люминесцентное, ЛБ-40",
-    measured: 320,
+    workCategory,
+    lightingSystem: "Искусственное, общее, равномерное",
+    lightingType: "Светодиодное",
+    measured,
     keo: "-",
-    allowed: 300,
+    allowed,
   };
 }
 
-const adminRows = [
-  ["1т", "Кабинет директора"],
-  ["2т", "Кабинет главного бухгалтера"],
-  ["3т", "Кабинет менеджера"],
-  ["4т", "Приёмная"],
-  ["5т", "Отдел кадров"],
-  ["6т", "Касса"],
-  ["7т", "Архив"],
-  ["8т", "Серверная"],
-  ["9т", "Кабинет юриста"],
-  ["10т", "Зал переговоров"],
-  ["11т", "Кабинет экономиста"],
-  ["12т", "Кабинет ОТ"],
-  ["13т", "Кабинет инженера"],
+const places = [
+  {
+    number: 1,
+    name: "Административно – управленческий персонал",
+    measurements: [
+      ["1т", "Кабинет директора", "А-1", 461, 300],
+      ["2т", "Главный бухгалтер", "А-1", 540, 300],
+      ["3т", "Кабинет менеджера", "А-1", 510, 400],
+      ["4т", "Приёмная", "А-1", 480, 300],
+      ["5т", "Отдел кадров", "А-1", 520, 300],
+      ["6т", "Касса", "А-1", 590, 300],
+      ["7т", "Архив", "А-1", 430, 300],
+      ["8т", "Серверная", "А-1", 470, 300],
+      ["9т", "Кабинет юриста", "А-1", 505, 300],
+      ["10т", "Зал переговоров", "А-1", 570, 300],
+      ["11т", "Кабинет экономиста", "А-1", 545, 300],
+      ["12т", "Кабинет ОТ", "А-1", 555, 300],
+      ["13т", "Кабинет инженера", "А-1", 580, 300],
+    ],
+  },
+  {
+    number: 2,
+    name: "Производственный персонал",
+    measurements: [
+      ["14т", "Цех №1", "Б-2", 250, 200],
+      ["15т", "Цех №2", "Б-2", 280, 200],
+      ["16т", "Склад готовой продукции", "Б-2", 310, 200],
+    ],
+  },
 ];
 
-const productionRows = [
-  ["14т", "Цех №1"],
-  ["15т", "Цех №2"],
-  ["16т", "Склад готовой продукции"],
-];
+// Build the flat measurements array the same way generateLightingDocx.ts does.
+const measurements = [];
+let rowNum = 1;
+for (const place of places) {
+  place.measurements.forEach((row, i) => {
+    measurements.push({
+      ...makeRow(rowNum++, row[0], row[1], row[2], row[3], row[4]),
+      showPlace: i === 0,
+      placeNumber: place.number,
+      placeName: place.name,
+    });
+  });
+}
+
+const placesList = places.map((p) => `${p.number}. ${p.name}`).join(", ");
 
 const data = {
-  protocol: {
-    number: "TEST-LIGHT-001",
-    year: "2026",
-    day: "25",
-    month: "мая",
-    dateYear: "2026",
-  },
-  customer: { name: "ТОО «Test Company»", address: "Тестовый адрес, 123" },
-  measurementDate: { day: "25", month: "мая", year: "2026" },
-  purpose: "Проверка section-rows",
+  "protocol.number": "TEST-LIGHT-001",
+  "protocol.year": "2026",
+  "protocol.day": "25",
+  "protocol.month": "мая",
+  "protocol.dateYear": "2026",
+  "customer.name": "ТОО «Test Company»",
+  "customer.address": "Тестовый адрес, 123",
+  "measurementDate.day": "25",
+  "measurementDate.month": "мая",
+  "measurementDate.year": "2026",
+  purpose: "Проверка dynamic section-rows",
   methodologyStandard: "ГОСТ 24940-96",
   productStandard: "Приказ МЗ РК",
   representative: "Иванов И.И.",
@@ -80,23 +101,11 @@ const data = {
   "conditions.t": "20",
   "conditions.h": "50",
   "conditions.p": "700",
-  placesList: "1. Офис, 2. Цех",
-  places: [
-    { number: 1, name: "Офис" },
-    { number: 2, name: "Цех" },
-  ],
-  // adminMeasurements / productionMeasurements are what the new template
-  // consumes. We also keep lighting_measurements for back-compat.
-  adminMeasurements: adminRows.map(([pt, pl], i) => makeRow(i + 1, pt, pl)),
-  productionMeasurements: productionRows.map(([pt, pl], i) =>
-    makeRow(adminRows.length + i + 1, pt, pl),
-  ),
-  lighting_measurements: [
-    ...adminRows.map(([pt, pl], i) => makeRow(i + 1, pt, pl)),
-    ...productionRows.map(([pt, pl], i) =>
-      makeRow(adminRows.length + i + 1, pt, pl),
-    ),
-  ],
+  placesList,
+  measurements,
+  // Backward-compat keys (for any un-rebuilt old templates).
+  adminMeasurements: measurements.filter((r) => r.placeNumber === 1),
+  productionMeasurements: measurements.filter((r) => r.placeNumber === 2),
   "performer.fullName": "Тестов Т.Т.",
   "performer.position": "Инженер",
   "director.fullName": "Директоров Д.Д.",
@@ -135,35 +144,39 @@ function run() {
   // Post-render structural verification.
   const verifyZip = new PizZip(out);
   const xml = verifyZip.file("word/document.xml").asText();
-  const adminHits = (xml.match(/1\. Административно/g) || []).length;
-  const prodHits = (xml.match(/2\. Производственный персонал/g) || []).length;
+  const adminHits = (xml.match(/Административно/g) || []).length;
+  const prodHits = (xml.match(/Производственный персонал/g) || []).length;
   const tblCount = (xml.match(/<w:tbl>/g) || []).length;
   const trCount = (xml.match(/<w:tr[ >]/g) || []).length;
-  const dataRowHits = (xml.match(/Кабинет директора/g) || []).length;
-  const prodCellHits = (xml.match(/Цех №1/g) || []).length;
+  const firstAdminRow = (xml.match(/Кабинет директора/g) || []).length;
+  const firstProdRow = (xml.match(/Цех №1/g) || []).length;
   const leftover = xml.includes("{#") || xml.includes("{/");
 
   console.log("--- VERIFY ---");
   console.log("tables:", tblCount);
   console.log("rows  :", trCount);
-  console.log("section-row 'Административно' occurrences:", adminHits);
-  console.log("section-row 'Производственный' occurrences:", prodHits);
-  console.log("admin first row 'Кабинет директора':", dataRowHits);
-  console.log("production row 'Цех №1':", prodCellHits);
+  console.log("'Административно' section hits:", adminHits);
+  console.log("'Производственный персонал' section hits:", prodHits);
+  console.log("'Кабинет директора' data row:", firstAdminRow);
+  console.log("'Цех №1' data row:", firstProdRow);
   console.log("unresolved {#…}/{/…} markers:", leftover);
 
-  const expected =
+  // header(1) + numbering(1) + section1(1) + 13 admin data rows
+  // + section2(1) + 3 production data rows = 20, plus first table (1) = 21
+  const expectedTr = 21;
+  // Each place name appears once in the placesList field and once in its
+  // dynamic section header row, so the expected hit count per place is 2.
+  const ok =
     tblCount === 2 &&
-    adminHits === 1 &&
-    prodHits === 1 &&
-    dataRowHits === 1 &&
-    prodCellHits === 1 &&
+    adminHits === 2 &&
+    prodHits === 2 &&
+    firstAdminRow === 1 &&
+    firstProdRow === 1 &&
     !leftover &&
-    // header(1) + numbering(1) + section1(1) + 13 admin data rows
-    //  + section2(1) + 3 production data rows = 20; plus first table (1) = 21
-    trCount === 21;
-  if (!expected) {
-    console.error("FAIL: structural expectations not met.");
+    trCount === expectedTr;
+
+  if (!ok) {
+    console.error(`FAIL: expected trCount=${expectedTr}, got ${trCount}; or other check failed.`);
     process.exit(2);
   }
   console.log("ALL CHECKS PASSED");

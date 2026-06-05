@@ -256,9 +256,11 @@ function SelectInput({
 /* ------------------------------------------------------------------ */
 
 function isScalarOnly(field: GroupField): boolean {
-  return field.children.every(
-    (c) => c.kind === "text" || c.kind === "number" || c.kind === "select",
-  );
+  return field.children
+    .filter((c) => !c.hidden)
+    .every(
+      (c) => c.kind === "text" || c.kind === "number" || c.kind === "select",
+    );
 }
 
 function GroupBlock({
@@ -299,7 +301,7 @@ function GroupBlock({
         {resolveSectionTitle(path, field)}
       </legend>
       <div className={gridClass}>
-        {field.children.map((child) => (
+        {field.children.filter((c) => !c.hidden).map((child) => (
           <FieldNode
             key={child.key}
             field={child}
@@ -558,7 +560,8 @@ function TableArray({
   canRemove,
 }: ArrayBodyProps) {
   if (field.item.kind !== "group") return null;
-  const columns = field.item.children;
+  // Exclude hidden fields — they remain in data but are not table columns.
+  const columns = field.item.children.filter((c) => !c.hidden);
   // Item-path is built once per row; column labels resolve against the
   // item path so context-specific overrides still apply.
   const sampleItemPath: FieldPath = [...path, 0];

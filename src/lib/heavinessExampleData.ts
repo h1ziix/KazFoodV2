@@ -61,8 +61,8 @@ export const heavinessExample: HeavinessProtocol = {
     dateYear: "2026",
   },
   customer: {
-    name: "ТОО «KazEcoFood»",
-    address: "Алматы қ., Түрксіб ауданы, Остроумов көш., 50А үй",
+    name: "",
+    address: "",
   },
   measurementDate: {
     day: "10",
@@ -75,8 +75,8 @@ export const heavinessExample: HeavinessProtocol = {
     adminWorkplace(3, "01 001 003", "Бухгалтер"),
   ],
   performer: {
-    fullName: "Исаева А.В.",
-    position: "Специалист лаборатории",
+    fullName: "",
+    position: "",
   },
   representative: {
     fullName: "Богачев А.И.",

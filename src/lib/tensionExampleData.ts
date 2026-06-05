@@ -80,9 +80,8 @@ export const tensionExample: TensionProtocol = {
     dateYear: "2026",
   },
   customer: {
-    name: "ТОО «KazEcoFood»",
-    address:
-      "Алманиская обл, Карасайский район, село Кокозек, улица Несибели, 715",
+    name: "",
+    address: "",
   },
   measurementDate: {
     day: "10",
@@ -95,8 +94,8 @@ export const tensionExample: TensionProtocol = {
     adminWorkplace(3, "01 001 003", "Бухгалтер"),
   ],
   performer: {
-    fullName: "Исаева А.В.",
-    position: "Специалист лаборатории",
+    fullName: "",
+    position: "",
   },
   representative: {
     fullName: "Богачев А.И.",

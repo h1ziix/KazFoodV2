@@ -29,11 +29,13 @@ const measurementSchema = z.object({
   rowNumber: z.number().int().positive(),
   pointNumber: nonEmpty,
   place: nonEmpty,
-  time: nonEmpty,
-  ppePresent: optStr,
-  ppeAbsent: optStr,
-  sourceStationary: optStr,
-  sourceNonStationary: optStr,
+  // Hidden in the form UI; pre-filled so new rows arrive with correct DOCX values.
+  time: z.string().default("7-8"),
+  ppePresent: z.string().default("+"),
+  ppeAbsent: z.string().default(""),
+  sourceStationary: z.string().default("+"),
+  sourceNonStationary: z.string().default(""),
+  // Hidden in the form UI; user fills these directly in the DOCX.
   octaves: octaveSchema,
   character: characterSchema,
   measured: nonEmpty,

@@ -169,9 +169,8 @@ export const summaryExample: SummaryProtocol = {
     dateYear: "2026",
   },
   customer: {
-    name: "ТОО «KazEcoFood»",
-    address:
-      "Алманиская обл, Карасайский район, село Кокозек, улица Несибели, 715",
+    name: "",
+    address: "",
   },
   measurementLocation:
     "1. Административно – управленческий персонал, 2. Производственный персонал",
@@ -236,11 +235,11 @@ export const summaryExample: SummaryProtocol = {
     },
   ],
   performer: {
-    fullName: "Дьяченко И.С.",
-    position: "Заведующий лабораторией",
+    fullName: "",
+    position: "",
   },
   director: {
-    fullName: "Богачев А.И.",
-    position: "Начальник по БиОТ",
+    fullName: "",
+    position: "",
   },
 };

@@ -15,6 +15,23 @@ import {
   findDescriptor,
   renderDescriptor,
 } from "@/lib/docs/registry";
+import { migrateDocumentData } from "@/lib/attestations/migrate";
+import {
+  applyCommonDefaults,
+  applyCommonToSeed,
+} from "@/lib/docs/applyCommonData";
+import {
+  extractCodingSections,
+  syncProtocolFromCoding,
+  computeSyncDiff,
+  getOrphanedPlaces,
+  removeOrphanedPlace,
+  CLASS_A_KEYS,
+  SYNCABLE_KEYS,
+  type SyncDiff,
+  type OrphanedPlace,
+} from "@/lib/docs/syncWorkplaces";
+import type { CommonData } from "@/types/common";
 import type { Json } from "@/types/database";
 
 type Status =
@@ -40,6 +57,12 @@ export interface AttestationEditorProps {
    * etc.); we just bubble changes up.
    */
   onChange: (next: DocumentsData) => void;
+  /**
+   * Shared attestation-level data. Injected into every protocol's
+   * template context for keys that are empty in the document-specific
+   * form.  Document values always take priority over common values.
+   */
+  commonData?: CommonData | null;
 }
 
 /**
@@ -59,18 +82,22 @@ export interface AttestationEditorProps {
 export function AttestationEditor({
   documents,
   onChange,
+  commonData,
 }: AttestationEditorProps) {
   const [docType, setDocType] = useState<string>(DOCUMENT_REGISTRY[0].key);
   const [touched, setTouched] = useState(false);
   const [fatalErrors, setFatalErrors] = useState<string[]>([]);
   const [status, setStatus] = useState<Status>({ kind: "idle" });
+  const [syncPending, setSyncPending] = useState<SyncDiff | null>(null);
 
   const descriptor = useMemo(() => findDescriptor(docType), [docType]);
 
   const formField = useMemo(
     () =>
       descriptor
-        ? buildFormDescriptor(descriptor.schema as unknown as ZodTypeAny)
+        ? buildFormDescriptor(descriptor.schema as unknown as ZodTypeAny, {
+            skipKeys: descriptor.formSkipKeys,
+          })
         : null,
     [descriptor],
   );
@@ -79,24 +106,79 @@ export function AttestationEditor({
   // yet for this docType, we transparently seed it with the example so
   // the user starts from a valid baseline (identical to the old single-
   // doc UX in app/page.tsx).
-  const value = (descriptor && documents[descriptor.key]) ?? null;
+  //
+  // `value` is a computed view: empty shared fields (customer.name, etc.)
+  // are filled from `commonData` so validation passes and the form visually
+  // shows inherited values.  The stored slot stays untouched; only the
+  // display / validation path receives the merged result.
+  const storedValue = (descriptor && documents[descriptor.key]) ?? null;
+  const value = useMemo(
+    () => applyCommonDefaults(storedValue, commonData ?? null),
+    [storedValue, commonData],
+  );
+
+  // Coding sections derived from the coding slot.  Stays stable when other
+  // slots change because shallow-spread preserves object references.
+  const codingRaw = documents["coding"] ?? null;
+  const codingSections = useMemo(
+    () => extractCodingSections(codingRaw),
+    [codingRaw],
+  );
+
+  // Orphaned places: Class A sections present in the protocol but absent
+  // from coding.  Only shown when coding has sections (so we don't flag
+  // everything before the user fills coding).
+  const orphanedPlaces = useMemo<OrphanedPlace[]>(() => {
+    if (!descriptor || !CLASS_A_KEYS.has(descriptor.key)) return [];
+    if (codingSections.length === 0) return [];
+    return getOrphanedPlaces(storedValue, codingSections);
+  }, [descriptor, storedValue, codingSections]);
 
   // Seed missing slots once per tab switch.  We use a ref to skip the
   // effect if the slot is already populated, avoiding any chance of
   // overwriting user edits on re-render.
+  //
+  // When seeding, shared fields are overwritten with commonData values so
+  // new document tabs immediately show the user's customer/performer data
+  // instead of the generic example placeholders.  Syncable protocols also
+  // receive coding-derived workplace structure if coding is already filled.
   const seededRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     if (!descriptor) return;
     if (documents[descriptor.key] !== undefined) return;
     if (seededRef.current.has(descriptor.key)) return;
     seededRef.current.add(descriptor.key);
+    const seed = applyCommonToSeed(
+      structuredClone(descriptor.example),
+      commonData ?? null,
+    );
+    const seeded =
+      SYNCABLE_KEYS.has(descriptor.key) && codingSections.length > 0
+        ? syncProtocolFromCoding(descriptor.key, seed, codingSections)
+        : seed;
     onChange({
       ...documents,
-      [descriptor.key]: structuredClone(descriptor.example) as Json,
+      [descriptor.key]: seeded as Json,
     });
     setTouched(false);
     setFatalErrors([]);
     setStatus({ kind: "idle" });
+  }, [descriptor, documents, onChange, commonData, codingSections]);
+
+  // Migrate persisted blobs from old schema shapes to the current shape.
+  // Runs once per document key; the autosave debounce then persists the
+  // migrated form so the old shape is never written back to Supabase.
+  const migratedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!descriptor) return;
+    const current = documents[descriptor.key];
+    if (current === undefined) return;
+    if (migratedRef.current.has(descriptor.key)) return;
+    migratedRef.current.add(descriptor.key);
+    const migrated = migrateDocumentData(descriptor.key, current);
+    if (migrated !== current) {
+      onChange({ ...documents, [descriptor.key]: migrated as Json });
+    }
   }, [descriptor, documents, onChange]);
 
   const validation = useMemo(() => {
@@ -124,13 +206,44 @@ export function AttestationEditor({
 
   function handleLoadExample() {
     if (!descriptor) return;
+    const seed = applyCommonToSeed(
+      structuredClone(descriptor.example),
+      commonData ?? null,
+    );
     onChange({
       ...documents,
-      [descriptor.key]: structuredClone(descriptor.example) as Json,
+      [descriptor.key]: seed as Json,
     });
     setTouched(false);
     setFatalErrors([]);
     setStatus({ kind: "idle" });
+  }
+
+  function handleSyncRequest() {
+    if (!descriptor) return;
+    const diff = computeSyncDiff(descriptor.key, storedValue, codingSections);
+    setSyncPending(diff);
+  }
+
+  function handleSyncConfirm() {
+    if (!descriptor || syncPending === null) return;
+    const result = syncProtocolFromCoding(descriptor.key, storedValue, codingSections);
+    onChange({ ...documents, [descriptor.key]: result as Json });
+    setTouched(true);
+    setStatus({ kind: "idle" });
+    setSyncPending(null);
+  }
+
+  function handleSyncCancel() {
+    setSyncPending(null);
+  }
+
+  function handleDeleteOrphanedPlace(placeName: string) {
+    if (!descriptor) return;
+    const result = removeOrphanedPlace(storedValue, placeName);
+    if (result === storedValue) return;
+    onChange({ ...documents, [descriptor.key]: result as Json });
+    setTouched(true);
   }
 
   async function handleGenerate() {
@@ -141,7 +254,7 @@ export function AttestationEditor({
       // Exact same payload shape that pre-Supabase code passed in —
       // the generators don't know (or care) that storage moved.
       const parsed = descriptor.schema.parse(value);
-      await renderDescriptor(descriptor, parsed);
+      await renderDescriptor(descriptor, parsed, commonData);
       setStatus({ kind: "generated", message: "DOCX сгенерирован" });
     } catch (err) {
       if (err instanceof TemplateRenderError) {
@@ -154,6 +267,12 @@ export function AttestationEditor({
   }
 
   const currentLabel = descriptor?.label ?? "";
+  const isClassA = descriptor != null && CLASS_A_KEYS.has(descriptor.key);
+  const showSync =
+    descriptor != null &&
+    descriptor.key !== "coding" &&
+    SYNCABLE_KEYS.has(descriptor.key) &&
+    codingSections.length > 0;
 
   return (
     <section className="flex flex-col gap-5">
@@ -178,7 +297,10 @@ export function AttestationEditor({
               <button
                 key={d.key}
                 type="button"
-                onClick={() => setDocType(d.key)}
+                onClick={() => {
+                  setDocType(d.key);
+                  setSyncPending(null);
+                }}
                 className={
                   active
                     ? "rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white shadow-sm"
@@ -208,6 +330,72 @@ export function AttestationEditor({
           Загрузить пример заново
         </button>
       </section>
+
+      {showSync && (
+        <section className="rounded-lg border border-slate-200 bg-white px-4 py-3">
+          {syncPending === null ? (
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-xs text-slate-500">
+                Рабочие места можно синхронизировать из раздела «Кодировка».
+              </p>
+              <button
+                type="button"
+                onClick={handleSyncRequest}
+                className="shrink-0 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+              >
+                Синхронизировать из кодировки
+              </button>
+            </div>
+          ) : (
+            <SyncConfirmPanel
+              isClassA={isClassA}
+              diff={syncPending}
+              onConfirm={handleSyncConfirm}
+              onCancel={handleSyncCancel}
+            />
+          )}
+        </section>
+      )}
+
+      {orphanedPlaces.length > 0 && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
+          <p className="mb-2 text-xs font-semibold text-amber-800">
+            Разделы не найдены в кодировке:
+          </p>
+          <ul className="flex flex-col gap-1.5">
+            {orphanedPlaces.map((p) => (
+              <li
+                key={p.name}
+                className="flex items-center justify-between gap-3 rounded-md border border-amber-200 bg-white px-3 py-2"
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="text-amber-500" aria-hidden="true">
+                    ⚠
+                  </span>
+                  <span className="truncate text-sm font-medium text-slate-800">
+                    {p.name}
+                  </span>
+                  <span className="shrink-0 text-xs text-slate-500">
+                    {p.measurementCount}{" "}
+                    {plural(p.measurementCount, [
+                      "измерение",
+                      "измерения",
+                      "измерений",
+                    ])}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handleDeleteOrphanedPlace(p.name)}
+                  className="shrink-0 rounded-md border border-rose-200 bg-white px-2.5 py-1 text-xs font-medium text-rose-700 hover:bg-rose-50"
+                >
+                  Удалить
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {formField && value != null && (
         <FormRenderer
@@ -255,7 +443,113 @@ export function AttestationEditor({
   );
 }
 
-/** Russian pluralisation for inline status copy. */
+// ─── Sync confirmation panel ──────────────────────────────────────────────────
+
+function SyncConfirmPanel({
+  isClassA,
+  diff,
+  onConfirm,
+  onCancel,
+}: {
+  isClassA: boolean;
+  diff: SyncDiff;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const hasDeletions = diff.toDelete.length > 0;
+  const itemWord = isClassA
+    ? ([" раздел", " раздела", " разделов"] as [string, string, string])
+    : ([" строка", " строки", " строк"] as [string, string, string]);
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div>
+        <p className="text-sm font-medium text-slate-800">
+          {isClassA
+            ? "Синхронизировать разделы из кодировки?"
+            : "Синхронизировать рабочие места из кодировки?"}
+        </p>
+        <div className="mt-2 flex flex-wrap gap-2">
+          {diff.toAdd > 0 && (
+            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-medium text-emerald-800">
+              + {diff.toAdd}
+              {plural(diff.toAdd, itemWord)} добавится
+            </span>
+          )}
+          {diff.toUpdate > 0 && (
+            <span className="inline-flex items-center gap-1 rounded-full bg-sky-100 px-2.5 py-0.5 text-xs font-medium text-sky-800">
+              {diff.toUpdate}
+              {plural(diff.toUpdate, itemWord)} сохранится
+            </span>
+          )}
+          {hasDeletions && (
+            <span className="inline-flex items-center gap-1 rounded-full bg-rose-100 px-2.5 py-0.5 text-xs font-medium text-rose-800">
+              − {diff.toDelete.length}
+              {plural(diff.toDelete.length, itemWord)} удалится
+            </span>
+          )}
+        </div>
+      </div>
+
+      {isClassA && (
+        <p className="text-xs text-slate-500">
+          Существующие разделы и все измерения в них сохранятся. Разделы,
+          отсутствующие в кодировке, будут отмечены предупреждением.
+        </p>
+      )}
+
+      {!isClassA && !hasDeletions && (
+        <p className="text-xs text-slate-500">
+          Данные существующих строк сохранятся. Новые строки добавятся с пустыми
+          полями. Если код рабочего места был изменён в кодировке, старая строка
+          будет пересоздана.
+        </p>
+      )}
+
+      {hasDeletions && (
+        <div>
+          <p className="mb-1.5 text-xs font-medium text-rose-700">
+            Следующие строки будут удалены (отсутствуют в кодировке):
+          </p>
+          <ul className="max-h-36 overflow-y-auto rounded-md border border-rose-200 bg-rose-50 px-3 py-2">
+            {diff.toDelete.map((item) => (
+              <li key={item.code} className="py-0.5 text-xs text-rose-800">
+                {item.code} — {item.name}
+              </li>
+            ))}
+          </ul>
+          <p className="mt-1.5 text-xs text-rose-600">
+            Данные этих строк будут потеряны. Действие необратимо.
+          </p>
+        </div>
+      )}
+
+      <div className="flex justify-end gap-2">
+        <button
+          type="button"
+          onClick={onCancel}
+          className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+        >
+          Отмена
+        </button>
+        <button
+          type="button"
+          onClick={onConfirm}
+          className={`rounded-md px-3 py-1.5 text-xs font-medium text-white shadow-sm ${
+            hasDeletions
+              ? "bg-rose-600 hover:bg-rose-700"
+              : "bg-slate-900 hover:bg-slate-800"
+          }`}
+        >
+          Синхронизировать
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Russian pluralisation ────────────────────────────────────────────────────
+
 function plural(n: number, forms: [string, string, string]): string {
   const abs = Math.abs(n) % 100;
   const n1 = abs % 10;

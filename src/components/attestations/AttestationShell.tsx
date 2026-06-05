@@ -7,10 +7,13 @@ import {
   AttestationEditor,
   type DocumentsData,
 } from "./AttestationEditor";
+import { CommonDataForm } from "./CommonDataForm";
 import {
   saveAttestationAction,
   type SaveAttestationPayload,
 } from "@/lib/attestations/actions";
+import type { CommonData } from "@/types/common";
+import type { Json } from "@/types/database";
 
 interface AttestationShellProps {
   id: string;
@@ -19,6 +22,7 @@ interface AttestationShellProps {
   initialCustomerAddress: string;
   initialDocuments: DocumentsData;
   initialUpdatedAt: string;
+  initialCommonData: CommonData;
 }
 
 type SaveState =
@@ -54,6 +58,7 @@ export function AttestationShell({
   initialCustomerAddress,
   initialDocuments,
   initialUpdatedAt,
+  initialCommonData,
 }: AttestationShellProps) {
   const router = useRouter();
 
@@ -61,6 +66,7 @@ export function AttestationShell({
   const [customerName, setCustomerName] = useState(initialCustomerName);
   const [customerAddress, setCustomerAddress] = useState(initialCustomerAddress);
   const [documents, setDocuments] = useState<DocumentsData>(initialDocuments);
+  const [commonData, setCommonData] = useState<CommonData>(initialCommonData);
 
   const [save, setSave] = useState<SaveState>({
     kind: "idle",
@@ -74,6 +80,7 @@ export function AttestationShell({
     customer_name: customerName,
     customer_address: customerAddress,
     documents_data: documents,
+    common_data: commonData as unknown as Json,
   });
   useEffect(() => {
     snapshotRef.current = {
@@ -81,8 +88,9 @@ export function AttestationShell({
       customer_name: customerName,
       customer_address: customerAddress,
       documents_data: documents,
+      common_data: commonData as unknown as Json,
     };
-  }, [title, customerName, customerAddress, documents]);
+  }, [title, customerName, customerAddress, documents, commonData]);
 
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -129,7 +137,7 @@ export function AttestationShell({
         timerRef.current = null;
       }
     };
-  }, [title, customerName, customerAddress, documents, flush]);
+  }, [title, customerName, customerAddress, documents, commonData, flush]);
 
   return (
     <main className="mx-auto flex max-w-6xl flex-col gap-5 p-6 pb-28">
@@ -193,7 +201,13 @@ export function AttestationShell({
         </div>
       </header>
 
-      <AttestationEditor documents={documents} onChange={setDocuments} />
+      <CommonDataForm commonData={commonData} onChange={setCommonData} />
+
+      <AttestationEditor
+        documents={documents}
+        onChange={setDocuments}
+        commonData={commonData}
+      />
     </main>
   );
 }

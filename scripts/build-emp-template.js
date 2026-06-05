@@ -1,35 +1,27 @@
 /**
  * scripts/build-emp-template.js
  *
- * Rebuild public/templates/emp-protocol.docx so the EMP measurement
- * table:
+ * Converts public/templates/emp-protocol.docx from the old
+ * single static section layout to the Meteo-style dynamic layout.
  *
- *   1. Contains the section-divider row
- *        "1. Административно – управленческий персонал"
- *      taken VERBATIM from the reference DOCX
- *        "7. ЭМП каз-рус ГОТОВО KazFood.docx"
- *      (gridSpan=19, full borders, bold centered).  The row is
- *      inserted between the existing header rows and the first
- *      <w:tr> that opens the {#emp_measurements} loop, so it stays
- *      static (one row in the output) and does NOT become part of
- *      every loop iteration.
+ * CURRENT template state (produced by the previous version of this script):
+ *   - Static section row: "1. Административно – управленческий персонал"
+ *   - Loop row 1:         {#emp_measurements}...cells...
+ *   - Loop row 2:         ...cells...
+ *   - Loop row 3:         ...cells...{/emp_measurements}
  *
- *   2. Uses fixed range labels "Диапазон 1" / "Диапазон 2" instead
- *      of free-form frequency text. The data-driven placeholders
- *      {range1Name} and {range2Name} are renamed to {range1Label}
- *      and {range2Label}, and src/lib/generateEmpDocx.ts supplies
- *      constant values for them.
+ * TARGET template state (matching the Meteo pattern):
+ *   - Conditional section row: {#measurements}{-w:tr showPlace}{placeNumber}. {placeName}{/}
+ *   - Loop row 1 (unchanged):  ...cells...
+ *   - Loop row 2 (unchanged):  ...cells...
+ *   - Loop row 3 (close loop): ...cells...{/measurements}
  *
- * Strategy is byte-surgical: we never rebuild the table, only
- *   - insert one extra <w:tr> immediately before the loop opener
- *     row, and
- *   - rename two placeholder tokens inside cells.
- * All tblPr / trPr / tcPr / tblGrid / vMerge / borders / fonts /
- * row heights are preserved exactly.
+ * The {range1Label}/{range2Label} tokens from the previous build are
+ * preserved — they remain in the template cells unchanged.
  *
  * Usage:
- *   node scripts/build-emp-template.js            # dry-run
- *   node scripts/build-emp-template.js --apply    # overwrite
+ *   node scripts/build-emp-template.js           # dry-run only
+ *   node scripts/build-emp-template.js --apply   # overwrite template
  */
 
 "use strict";
@@ -40,46 +32,34 @@ const PizZip = require("pizzip");
 
 const ROOT = path.resolve(__dirname, "..");
 const TEMPLATE = path.join(ROOT, "public", "templates", "emp-protocol.docx");
-const DRY_RUN_OUT = path.join(
-  ROOT,
-  "public",
-  "templates",
-  "emp-protocol.dryrun.docx",
-);
+const DRY_RUN_OUT = path.join(ROOT, "public", "templates", "emp-protocol.dryrun.docx");
 
-// Verbatim <w:tr> for the admin/management section divider, copied
-// from the reference DOCX (word/document.xml @ ~98700).  gridSpan=19
-// matches the 19-column tblGrid of the EMP measurement table.
-const SECTION_ROW_ADMIN =
-  '<w:tr w:rsidR="00C77C4B" w:rsidRPr="00B074D9" w14:paraId="03C89ABD" w14:textId="77777777" w:rsidTr="00671A2C">' +
-  '<w:trPr><w:trHeight w:val="285"/><w:jc w:val="center"/></w:trPr>' +
-  '<w:tc><w:tcPr><w:tcW w:w="15186" w:type="dxa"/><w:gridSpan w:val="19"/>' +
-  '<w:tcBorders>' +
-  '<w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/>' +
-  '<w:left w:val="single" w:sz="4" w:space="0" w:color="auto"/>' +
-  '<w:bottom w:val="single" w:sz="4" w:space="0" w:color="auto"/>' +
-  '<w:right w:val="single" w:sz="4" w:space="0" w:color="auto"/>' +
-  '</w:tcBorders><w:vAlign w:val="center"/></w:tcPr>' +
-  '<w:p w14:paraId="0E5C3E24" w14:textId="559B3275" w:rsidR="00C77C4B" w:rsidRPr="00B074D9" w:rsidRDefault="006B79A0" w:rsidP="00C77C4B">' +
-  '<w:pPr><w:jc w:val="center"/><w:rPr><w:b/><w:bCs/></w:rPr></w:pPr>' +
-  '<w:r w:rsidRPr="00077081"><w:rPr><w:b/><w:color w:val="000000"/></w:rPr>' +
-  '<w:t>1. Административно – управленческий персонал</w:t></w:r></w:p></w:tc></w:tr>';
-
-const LOOP_OPEN = "{#emp_measurements}";
-const RENAMES = [
-  ["{range1Name}", "{range1Label}"],
-  ["{range2Name}", "{range2Label}"],
-];
-
+/** Find the <w:tr>…</w:tr> span that contains `needle`. */
 function findEnclosingTr(xml, needle) {
   const idx = xml.indexOf(needle);
-  if (idx < 0) throw new Error(`marker not found: ${needle}`);
+  if (idx < 0) throw new Error(`Marker not found: ${needle}`);
   const s1 = xml.lastIndexOf("<w:tr ", idx);
   const s2 = xml.lastIndexOf("<w:tr>", idx);
   const start = Math.max(s1, s2);
-  if (start < 0) throw new Error("no <w:tr> before marker");
+  if (start < 0) throw new Error(`No enclosing <w:tr> for: ${needle}`);
   const end = xml.indexOf("</w:tr>", idx) + "</w:tr>".length;
-  return { start, end };
+  if (end < "</w:tr>".length) throw new Error(`No </w:tr> after: ${needle}`);
+  return { start, end, text: xml.slice(start, end) };
+}
+
+/**
+ * Replace the first <w:t>…</w:t> in `rowXml` with a new text node
+ * carrying `placeholder`.  Special XML characters are escaped.
+ */
+function buildSectionRow(rowXml, placeholder) {
+  const escaped = placeholder
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+  return rowXml.replace(
+    /<w:t(?:\s[^>]*)?>[\s\S]*?<\/w:t>/,
+    `<w:t xml:space="preserve">${escaped}</w:t>`,
+  );
 }
 
 function countMatches(s, re) {
@@ -93,81 +73,72 @@ function main() {
   const zip = new PizZip(buf);
   const docFile = zip.file("word/document.xml");
   if (!docFile) throw new Error("word/document.xml missing");
-  let xml = docFile.asText();
+  const xml = docFile.asText();
 
-  // Sanity: structure expectations.
-  const openCount = countMatches(xml, /\{#emp_measurements\}/g);
-  const closeCount = countMatches(xml, /\{\/emp_measurements\}/g);
-  if (openCount !== 1 || closeCount !== 1) {
-    throw new Error(
-      `Expected 1 open & 1 close emp_measurements loop; found ${openCount}/${closeCount}`,
-    );
+  // Verify current template state.
+  if (countMatches(xml, /\{#emp_measurements\}/g) !== 1) {
+    throw new Error("Expected exactly one {#emp_measurements}");
   }
-  for (const [from] of RENAMES) {
-    const c = countMatches(xml, new RegExp(from.replace(/[{}]/g, "\\$&"), "g"));
-    if (c !== 1) {
-      throw new Error(`Expected exactly one ${from}; found ${c}`);
-    }
+  if (countMatches(xml, /\{\/emp_measurements\}/g) !== 1) {
+    throw new Error("Expected exactly one {/emp_measurements}");
+  }
+  if (!xml.includes("1. Административно")) {
+    throw new Error("Static section row not found");
   }
 
-  // Insert section row immediately BEFORE the <w:tr> containing the
-  // loop opener — so it stays a static, single row (NOT part of the
-  // loop) in the rendered DOCX.
-  const loopRow = findEnclosingTr(xml, LOOP_OPEN);
-  const before = xml.slice(0, loopRow.start);
-  const after = xml.slice(loopRow.start);
-  let newXml = before + SECTION_ROW_ADMIN + after;
+  // Locate key rows.
+  const sectionRow = findEnclosingTr(xml, "1. Административно");
+  const firstLoopRow = findEnclosingTr(xml, "{#emp_measurements}");
+  const lastLoopRow = findEnclosingTr(xml, "{/emp_measurements}");
 
-  // Rename placeholder tokens. Each appears exactly once (asserted
-  // above) so plain .replace is safe.
-  for (const [from, to] of RENAMES) {
-    newXml = newXml.replace(from, to);
+  // Ordering sanity.
+  if (!(sectionRow.start < firstLoopRow.start)) {
+    throw new Error("Section row must come before the loop opener.");
   }
-
-  // Structural sanity.
-  const beforeStats = {
-    tbl: countMatches(xml, /<w:tbl>/g),
-    tblEnd: countMatches(xml, /<\/w:tbl>/g),
-    tr: countMatches(xml, /<w:tr[ >]/g),
-  };
-  const afterStats = {
-    tbl: countMatches(newXml, /<w:tbl>/g),
-    tblEnd: countMatches(newXml, /<\/w:tbl>/g),
-    tr: countMatches(newXml, /<w:tr[ >]/g),
-  };
-  console.log("Row counts before:", beforeStats);
-  console.log("Row counts after :", afterStats);
-  if (beforeStats.tbl !== afterStats.tbl || beforeStats.tblEnd !== afterStats.tblEnd) {
-    throw new Error("Table count drift — aborting.");
-  }
-  if (afterStats.tr !== beforeStats.tr + 1) {
-    throw new Error(
-      `Expected +1 <w:tr> (section row); got ${afterStats.tr - beforeStats.tr}`,
-    );
+  if (!(firstLoopRow.start <= lastLoopRow.start)) {
+    throw new Error("First loop row must not be after last loop row.");
   }
 
-  // The original {range1Name}/{range2Name} must be gone; the new
-  // labels must be present exactly once each.
-  for (const [from] of RENAMES) {
-    if (newXml.includes(from)) {
-      throw new Error(`Original placeholder ${from} still present`);
-    }
-  }
-  for (const [, to] of RENAMES) {
-    if (countMatches(newXml, new RegExp(to.replace(/[{}]/g, "\\$&"), "g")) !== 1) {
-      throw new Error(`New placeholder ${to} missing or duplicated`);
-    }
-  }
-
-  // Section row must appear inside the table region, NOT inside the
-  // loop body.
-  const newOpenIdx = newXml.indexOf(LOOP_OPEN);
-  const sectionIdx = newXml.indexOf(
-    "1. Административно – управленческий персонал",
+  // Build replacement rows.
+  const newSectionRow = buildSectionRow(
+    sectionRow.text,
+    "{#measurements}{-w:tr showPlace}{placeNumber}. {placeName}{/}",
   );
-  if (sectionIdx < 0 || sectionIdx > newOpenIdx) {
-    throw new Error("Section row not placed before loop opener");
+
+  // Extract all loop rows (from first to last, inclusive) and rename tags.
+  const loopXml = xml.slice(firstLoopRow.start, lastLoopRow.end);
+  const newLoopXml = loopXml
+    .replace("{#emp_measurements}", "")
+    .replace("{/emp_measurements}", "{/measurements}");
+
+  // Replace the static section row + all loop rows with new rows.
+  const regionStart = sectionRow.start;
+  const regionEnd = lastLoopRow.end;
+  const newXml =
+    xml.slice(0, regionStart) + newSectionRow + newLoopXml + xml.slice(regionEnd);
+
+  // Structural checks.
+  const beforeTr = countMatches(xml, /<w:tr[ >]/g);
+  const afterTr = countMatches(newXml, /<w:tr[ >]/g);
+  const beforeTbl = countMatches(xml, /<w:tbl>/g);
+  const afterTbl = countMatches(newXml, /<w:tbl>/g);
+
+  console.log(`<w:tr> count: ${beforeTr} → ${afterTr} (expected unchanged)`);
+  console.log(`<w:tbl> count: ${beforeTbl} → ${afterTbl} (expected unchanged)`);
+
+  if (beforeTbl !== afterTbl) throw new Error("Table count changed — aborting.");
+  if (afterTr !== beforeTr) {
+    throw new Error(
+      `Expected no change in <w:tr> count (section row replaced in-place); got ${afterTr - beforeTr}`,
+    );
   }
+
+  // Old markers gone, new markers present.
+  if (newXml.includes("{#emp_measurements}")) throw new Error("Old {#emp_measurements} still present");
+  if (newXml.includes("{/emp_measurements}")) throw new Error("Old {/emp_measurements} still present");
+  if (!newXml.includes("{#measurements}")) throw new Error("Missing {#measurements}");
+  if (!newXml.includes("{/measurements}")) throw new Error("Missing {/measurements}");
+  if (!newXml.includes("{-w:tr showPlace}")) throw new Error("Missing {-w:tr showPlace}");
 
   zip.file("word/document.xml", newXml);
   const out = zip.generate({ type: "nodebuffer" });

@@ -73,9 +73,8 @@ export const safetyExample: SafetyProtocol = {
     number: "1",
   },
   customer: {
-    name: "ТОО «KazEcoFood»",
-    address:
-      "Алманиская обл, Карасайский район, село Кокозек, улица Несибели, 715",
+    name: "",
+    address: "",
   },
   measurementPlace:
     "1. Административно – управленческий персонал, 2. Производственный персонал",
@@ -86,8 +85,8 @@ export const safetyExample: SafetyProtocol = {
   },
   sections: [adminSection, productionSection],
   performer: {
-    fullName: "Исаева А.В.",
-    position: "Специалист лаборатории",
+    fullName: "",
+    position: "",
   },
   representative: {
     fullName: "Богачев А.И.",

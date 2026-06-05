@@ -24,6 +24,9 @@ const measurementSchema = z.object({
 const placeSchema = z.object({
   number: z.number().int().positive(),
   name: nonEmpty,
+  measurements: z
+    .array(measurementSchema)
+    .min(1, "должно быть хотя бы одно измерение"),
 });
 
 export const empProtocolSchema = z.object({
@@ -48,9 +51,6 @@ export const empProtocolSchema = z.object({
   productStandard: nonEmpty,
   representative: nonEmpty,
   places: z.array(placeSchema).min(1, "должно быть хотя бы одно место"),
-  emp_measurements: z
-    .array(measurementSchema)
-    .min(1, "должно быть хотя бы одно измерение"),
   performer: z.object({
     fullName: nonEmpty,
     position: nonEmpty,

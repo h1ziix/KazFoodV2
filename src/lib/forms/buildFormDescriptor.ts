@@ -18,14 +18,26 @@ import type {
  * — the runtime zod validator still has the final word on what is
  * acceptable, so the worst case is a less ergonomic input, never a
  * broken document.
+ *
+ * @param opts.skipKeys  Key names whose corresponding fields are hidden
+ *   from the form UI but remain in data and in `defaultItem` for new
+ *   array rows.  Matched by key name at every level of the schema tree.
  */
-export function buildFormDescriptor(schema: ZodTypeAny): FormField {
-  return toField("root", schema, /* requiredFromParent */ true);
+export function buildFormDescriptor(
+  schema: ZodTypeAny,
+  opts?: { skipKeys?: readonly string[] },
+): FormField {
+  const ctx: BuildCtx = { skipKeys: opts?.skipKeys ?? [] };
+  return toField("root", schema, /* requiredFromParent */ true, ctx);
 }
 
 /* ------------------------------------------------------------------ */
 /* internal                                                            */
 /* ------------------------------------------------------------------ */
+
+interface BuildCtx {
+  readonly skipKeys: readonly string[];
+}
 
 interface ZodDef {
   typeName: string;
@@ -37,13 +49,21 @@ function defOf(s: ZodTypeAny): ZodDef {
   return (s as unknown as { _def: ZodDef })._def;
 }
 
-/** Peel Optional / Nullable / Default / Effects wrappers. */
-function unwrap(schema: ZodTypeAny): {
+interface Unwrapped {
   inner: ZodTypeAny;
   optional: boolean;
-} {
+  /** Value extracted from a `z.string().default(…)` wrapper, or undefined. */
+  defaultValue: unknown;
+  hasDefault: boolean;
+}
+
+/** Peel Optional / Nullable / Default / Effects wrappers. */
+function unwrap(schema: ZodTypeAny): Unwrapped {
   let current: ZodTypeAny = schema;
   let optional = false;
+  let defaultValue: unknown = undefined;
+  let hasDefault = false;
+
   // Hard cap: pathological nesting should never occur with hand-written
   // schemas, but the cap avoids any chance of an infinite loop.
   for (let i = 0; i < 16; i += 1) {
@@ -55,16 +75,27 @@ function unwrap(schema: ZodTypeAny): {
         current = d.innerType as ZodTypeAny;
         continue;
       case "ZodDefault":
+        // Capture the default value on first encounter only.
+        if (!hasDefault) {
+          try {
+            const raw = d.defaultValue;
+            defaultValue =
+              typeof raw === "function" ? (raw as () => unknown)() : raw;
+            hasDefault = true;
+          } catch {
+            // Ignore an unparseable default — field gets the generic fallback.
+          }
+        }
         current = d.innerType as ZodTypeAny;
         continue;
       case "ZodEffects":
         current = d.schema as ZodTypeAny;
         continue;
       default:
-        return { inner: current, optional };
+        return { inner: current, optional, defaultValue, hasDefault };
     }
   }
-  return { inner: current, optional };
+  return { inner: current, optional, defaultValue, hasDefault };
 }
 
 function humanise(key: string): string {
@@ -82,24 +113,26 @@ function toField(
   key: string,
   schema: ZodTypeAny,
   requiredFromParent: boolean,
+  ctx: BuildCtx,
 ): FormField {
-  const { inner, optional } = unwrap(schema);
+  const { inner, optional, defaultValue, hasDefault } = unwrap(schema);
   const required = requiredFromParent && !optional;
   const d = defOf(inner);
   const label = humanise(key);
+  const dv = hasDefault ? defaultValue : undefined;
 
   switch (d.typeName) {
     case "ZodObject":
-      return buildGroup(key, label, required, inner);
+      return buildGroup(key, label, required, inner, ctx);
     case "ZodArray":
-      return buildArray(key, label, required, inner);
+      return buildArray(key, label, required, inner, ctx);
     case "ZodEnum":
-      return buildEnum(key, label, required, d);
+      return buildEnum(key, label, required, d, dv);
     case "ZodNativeEnum":
-      return buildNativeEnum(key, label, required, d);
+      return buildNativeEnum(key, label, required, d, dv);
     case "ZodUnion":
     case "ZodDiscriminatedUnion":
-      return buildUnion(key, label, required, d);
+      return buildUnion(key, label, required, d, dv);
     case "ZodLiteral": {
       const value = d.value as unknown;
       const opt: SelectOption = {
@@ -112,15 +145,16 @@ function toField(
         label,
         required,
         options: [opt],
+        defaultValue: dv,
       };
       return field;
     }
     case "ZodNumber":
-      return buildNumber(key, label, required, d, /* allowEmpty */ false);
+      return buildNumber(key, label, required, d, /* allowEmpty */ false, dv);
     case "ZodBoolean":
     case "ZodString":
     default:
-      return buildText(key, label, required, d);
+      return buildText(key, label, required, d, dv);
   }
 }
 
@@ -129,12 +163,16 @@ function buildGroup(
   label: string,
   required: boolean,
   inner: ZodTypeAny,
+  ctx: BuildCtx,
 ): GroupField {
   const shapeFn = defOf(inner).shape as () => Record<string, ZodTypeAny>;
   const shape = shapeFn();
-  const children: FormField[] = Object.entries(shape).map(([k, child]) =>
-    toField(k, child, true),
-  );
+  const children: FormField[] = Object.entries(shape).map(([k, child]) => {
+    const field = toField(k, child, true, ctx);
+    // Mark as hidden without removing from the descriptor tree so that
+    // defaultFor() still includes it in defaultItem for new array rows.
+    return ctx.skipKeys.includes(k) ? { ...field, hidden: true } : field;
+  });
   return { kind: "group", key, label, required, children };
 }
 
@@ -143,10 +181,11 @@ function buildArray(
   label: string,
   required: boolean,
   inner: ZodTypeAny,
+  ctx: BuildCtx,
 ): ArrayField {
   const elem = defOf(inner).type as ZodTypeAny;
   const minLen = defOf(inner).minLength as { value: number } | null;
-  const item = toField("item", elem, true);
+  const item = toField("item", elem, true, ctx);
   const defaultItem = defaultFor(item);
   return {
     kind: "array",
@@ -165,6 +204,7 @@ function buildEnum(
   label: string,
   required: boolean,
   d: ZodDef,
+  defaultValue: unknown,
 ): SelectField {
   const values = (d.values as readonly string[]) ?? [];
   return {
@@ -176,6 +216,7 @@ function buildEnum(
       value: v,
       label: v === "" ? "—" : v,
     })),
+    defaultValue,
   };
 }
 
@@ -184,6 +225,7 @@ function buildNativeEnum(
   label: string,
   required: boolean,
   d: ZodDef,
+  defaultValue: unknown,
 ): SelectField {
   const raw = (d.values as Record<string, string | number>) ?? {};
   const opts: SelectOption[] = [];
@@ -195,7 +237,7 @@ function buildNativeEnum(
       opts.push({ value: v, label: k });
     }
   }
-  return { kind: "select", key, label, required, options: opts };
+  return { kind: "select", key, label, required, options: opts, defaultValue };
 }
 
 /**
@@ -208,6 +250,7 @@ function buildUnion(
   label: string,
   required: boolean,
   d: ZodDef,
+  defaultValue: unknown,
 ): FormField {
   const opts = (d.options as ZodTypeAny[]) ?? [];
   const peeled = opts.map((o) => unwrap(o).inner);
@@ -230,6 +273,7 @@ function buildUnion(
       required,
       defOf(numSchema),
       /* allowEmpty */ true,
+      defaultValue,
     );
   }
 
@@ -238,11 +282,11 @@ function buildUnion(
       const v = defOf(o).value as unknown;
       return { value: String(v), label: String(v === "" ? "—" : v) };
     });
-    return { kind: "select", key, label, required, options };
+    return { kind: "select", key, label, required, options, defaultValue };
   }
 
   // Last resort — accept anything as text and rely on zod to validate.
-  return { kind: "text", key, label, required };
+  return { kind: "text", key, label, required, defaultValue };
 }
 
 function buildNumber(
@@ -251,6 +295,7 @@ function buildNumber(
   required: boolean,
   d: ZodDef,
   allowEmpty: boolean,
+  defaultValue: unknown,
 ): NumberField {
   const checks = (d.checks as Array<{ kind: string; value?: number }>) ?? [];
   const integer = checks.some((c) => c.kind === "int");
@@ -263,6 +308,7 @@ function buildNumber(
     integer,
     min: minCheck?.value,
     allowEmptyString: allowEmpty,
+    defaultValue,
   };
 }
 
@@ -271,6 +317,7 @@ function buildText(
   label: string,
   required: boolean,
   d: ZodDef,
+  defaultValue: unknown,
 ): TextField {
   const checks = (d.checks as Array<{ kind: string; value?: number }>) ?? [];
   const minCheck = checks.find((c) => c.kind === "min");
@@ -280,6 +327,7 @@ function buildText(
     label,
     required,
     minLength: minCheck?.value,
+    defaultValue,
   };
 }
 
@@ -290,20 +338,30 @@ function buildText(
 /**
  * Build a structurally-valid (but possibly empty) value for a field.
  * Used both when seeding empty forms and when appending array rows.
+ *
+ * When the field carries a `defaultValue` (extracted from a zod
+ * `.default(…)` wrapper), that value is used instead of the generic
+ * empty-string / zero placeholder.  This ensures that hidden fields
+ * with schema defaults (e.g. `time: z.string().default("7-8")`) arrive
+ * pre-filled in newly added array rows.
  */
 export function defaultFor(field: FormField): unknown {
   switch (field.kind) {
     case "text":
-      return "";
+      return field.defaultValue !== undefined ? field.defaultValue : "";
     case "number":
+      if (field.defaultValue !== undefined) return field.defaultValue;
       // 0 is a safer default than NaN: it passes int/nonnegative checks
       // for the common case. Positive-only fields surface the error
       // inline, which is the desired UX (user sees the validation).
       return field.min && field.min > 0 ? field.min : 0;
     case "select":
+      if (field.defaultValue !== undefined) return field.defaultValue;
       return field.options[0]?.value ?? "";
     case "group": {
       const out: Record<string, unknown> = {};
+      // Include ALL children (hidden or not) so the data object is
+      // structurally complete for validation and DOCX generation.
       for (const c of field.children) out[c.key] = defaultFor(c);
       return out;
     }
@@ -317,10 +375,19 @@ export function defaultFor(field: FormField): unknown {
   }
 }
 
+/**
+ * A measurement array is rendered as a compact table when ALL visible
+ * (non-hidden) children are scalar.  Hidden children are excluded from
+ * this check because they do not appear as table columns.
+ */
 function isTabular(item: FormField): boolean {
   if (item.kind !== "group") return false;
-  return item.children.every(
-    (c) => c.kind === "text" || c.kind === "number" || c.kind === "select",
+  const visible = item.children.filter((c) => !c.hidden);
+  return (
+    visible.length > 0 &&
+    visible.every(
+      (c) => c.kind === "text" || c.kind === "number" || c.kind === "select",
+    )
   );
 }
 

@@ -49,6 +49,7 @@ export interface SaveAttestationPayload {
   customer_name: string;
   customer_address: string;
   documents_data: Record<string, Json>;
+  common_data: Json;
 }
 
 export async function saveAttestationAction(
@@ -60,6 +61,7 @@ export async function saveAttestationAction(
     customer_name: payload.customer_name,
     customer_address: payload.customer_address,
     documents_data: payload.documents_data,
+    common_data: payload.common_data,
   };
   const row = await updateAttestation(id, patch);
   // Only invalidate the list view — the editor manages its own state.

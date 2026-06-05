@@ -2,10 +2,9 @@ import type { IntroDocument } from "@/types/intro";
 
 export const introExample: IntroDocument = {
   customer: {
-    name: "KazEcoFood",
-    city: "Алматы",
-    address:
-      "Алманиская обл, Карасайский район, село Кокозек, улица Несибели, 715",
+    name: "",
+    city: "",
+    address: "",
   },
   measurementDate: {
     day: "10",

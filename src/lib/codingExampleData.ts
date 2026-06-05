@@ -6,9 +6,9 @@ function r(code: string, name: string, count = 1): CodingRow {
 
 export const codingExample: CodingProtocol = {
   approval: {
-    position: "Директор",
-    organization: "ТОО «KazEcoFood»",
-    fullName: "Балян Л.Н.",
+    position: "",
+    organization: "",
+    fullName: "",
     date: { day: "20", month: "апреля", year: "2026" },
   },
   sections: [

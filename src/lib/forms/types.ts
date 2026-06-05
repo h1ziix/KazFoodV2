@@ -18,6 +18,19 @@ export interface FieldBase {
   required: boolean;
   /** Optional placeholder hint surfaced in the input. */
   placeholder?: string;
+  /**
+   * When true, this field is excluded from the form UI but is still
+   * present in the data model and included in `defaultItem` for new
+   * array rows.  Used to hide protocol-specific fields that are
+   * pre-filled from schema defaults (e.g. Noise octave bands).
+   */
+  hidden?: boolean;
+  /**
+   * Default value extracted from a zod `.default(…)` wrapper.
+   * `defaultFor` returns this instead of the generic empty-string /
+   * zero placeholder so new array rows arrive pre-filled correctly.
+   */
+  defaultValue?: unknown;
 }
 
 export interface TextField extends FieldBase {

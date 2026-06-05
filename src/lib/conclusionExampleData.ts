@@ -10,9 +10,8 @@ import type { ConclusionProtocol } from "@/types/conclusion";
  */
 export const conclusionExample: ConclusionProtocol = {
   customer: {
-    name: "ТОО «KazEcoFood»",
-    address:
-      "Алманиская обл, Карасайский район, село Кокозек, улица Несибели, 715",
+    name: "",
+    address: "",
   },
   measurementPlace:
     "Административное помещение, производственное помещение, складское помещение, автомастерская (грузовая), помещение лаборатории, кухня.",
@@ -57,12 +56,12 @@ export const conclusionExample: ConclusionProtocol = {
     { labelKk: "", labelRu: "женщины", classValue: "2", count: 25 },
   ],
   performer: {
-    fullName: "Дьяченко И.С.",
-    position: "Заведующий лабораторией",
+    fullName: "",
+    position: "",
   },
   laboratoryHead: {
-    fullName: "Дьяченко В.Г.",
-    position: "Генеральный директор",
+    fullName: "",
+    position: "",
   },
   representative: {
     fullName: "Богачев А.И.",

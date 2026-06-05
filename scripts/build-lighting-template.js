@@ -1,31 +1,26 @@
 /**
  * scripts/build-lighting-template.js
  *
- * Rebuild public/templates/lighting-protocol.docx so the measurement
- * table contains the two section-divider rows ("1. Административно –
- * управленческий персонал" and "2. Производственный персонал") taken
- * VERBATIM from the original reference DOCX
- *   "6. Освещ. протокол замеров KazFood.docx"
+ * Converts public/templates/lighting-protocol.docx from the old
+ * two-section static layout to the Meteo-style dynamic layout.
  *
- * Strategy (no XML hand-crafting, no table rebuild):
- *   1. Read the current template document.xml.
- *   2. Locate the single data row that contains both the loop opener
- *      "{#lighting_measurements}" and the loop closer
- *      "{/lighting_measurements}". This is the row we must clone.
- *   3. Produce two variants of that row:
- *        - admin row: loop renamed to {#adminMeasurements}…{/adminMeasurements}
- *        - prod  row: loop renamed to {#productionMeasurements}…{/productionMeasurements}
- *   4. Read section-row-1 and section-row-2 XML extracted from the
- *      reference DOCX (verified earlier). These are the EXACT <w:tr>
- *      blocks (gridSpan=9, bold center) from the original document.
- *   5. Replace the original data row with:
- *         <section-row-1><admin-row><section-row-2><prod-row>
- *   6. Write a *dry-run* DOCX next to the template so the result can be
- *      inspected before the real template is overwritten.
+ * CURRENT template state (produced by the previous version of this script):
+ *   - Static section row: "1. Административно – управленческий персонал"
+ *   - Admin data row:     {#adminMeasurements}...cells...{/adminMeasurements}
+ *   - Static section row: "2. Производственный персонал"
+ *   - Production data row:{#productionMeasurements}...cells...{/productionMeasurements}
+ *
+ * TARGET template state (matching the Meteo pattern):
+ *   - Conditional section row: {#measurements}{-w:tr showPlace}{placeNumber}. {placeName}{/}
+ *   - Data row:                ...cells...{/measurements}
+ *
+ * The conditional section row is derived from the existing "1. Административно"
+ * static row — same XML structure, only the <w:t> text is replaced with
+ * the docxtemplater placeholder.  This preserves borders/spans/styles.
  *
  * Usage:
- *   node scripts/build-lighting-template.js            # dry-run only
- *   node scripts/build-lighting-template.js --apply    # overwrite template
+ *   node scripts/build-lighting-template.js           # dry-run only
+ *   node scripts/build-lighting-template.js --apply   # overwrite template
  */
 
 "use strict";
@@ -36,58 +31,40 @@ const PizZip = require("pizzip");
 
 const ROOT = path.resolve(__dirname, "..");
 const TEMPLATE = path.join(ROOT, "public", "templates", "lighting-protocol.docx");
-const DRY_RUN_OUT = path.join(
-  ROOT,
-  "public",
-  "templates",
-  "lighting-protocol.dryrun.docx",
-);
+const DRY_RUN_OUT = path.join(ROOT, "public", "templates", "lighting-protocol.dryrun.docx");
 
-// --- The two section <w:tr> blocks pulled verbatim from the reference
-// "6. Освещ. протокол замеров KazFood.docx" -> word/document.xml.
-// gridSpan=9 spans the full 9-column measurement table. Style/borders/
-// alignment/bold are exactly as authored in the original. ---
-
-const SECTION_ROW_ADMIN =
-  '<w:tr w:rsidR="00B165C8" w:rsidRPr="00CB1044" w14:paraId="7281DF87" w14:textId="77777777" w:rsidTr="00B851F2">' +
-  '<w:trPr><w:trHeight w:val="140"/><w:jc w:val="center"/></w:trPr>' +
-  '<w:tc><w:tcPr><w:tcW w:w="14312" w:type="dxa"/><w:gridSpan w:val="9"/><w:vAlign w:val="center"/></w:tcPr>' +
-  '<w:p w14:paraId="2EA45C9E" w14:textId="7E06E680" w:rsidR="00B165C8" w:rsidRPr="00CB1044" w:rsidRDefault="003D3D2F" w:rsidP="002D5625">' +
-  '<w:pPr><w:jc w:val="center"/><w:rPr><w:b/><w:lang w:eastAsia="ko-KR"/></w:rPr></w:pPr>' +
-  '<w:r w:rsidRPr="003D3D2F"><w:rPr><w:b/><w:color w:val="000000"/></w:rPr>' +
-  '<w:t>1. Административно – управленческий персонал</w:t></w:r></w:p></w:tc></w:tr>';
-
-const SECTION_ROW_PROD =
-  '<w:tr w:rsidR="00404FCE" w:rsidRPr="00CB1044" w14:paraId="376CD4EE" w14:textId="77777777" w:rsidTr="00404FCE">' +
-  '<w:trPr><w:trHeight w:val="284"/><w:jc w:val="center"/></w:trPr>' +
-  '<w:tc><w:tcPr><w:tcW w:w="14312" w:type="dxa"/><w:gridSpan w:val="9"/><w:vAlign w:val="center"/></w:tcPr>' +
-  '<w:p w14:paraId="6B730AA9" w14:textId="77777777" w:rsidR="00404FCE" w:rsidRPr="00705AA7" w:rsidRDefault="00404FCE" w:rsidP="00404FCE">' +
-  '<w:pPr><w:jc w:val="center"/><w:rPr><w:i/><w:color w:val="000000"/></w:rPr></w:pPr>' +
-  '<w:r w:rsidRPr="001336E5"><w:rPr><w:b/><w:bCs/></w:rPr>' +
-  '<w:t>2. Производственный персонал</w:t></w:r></w:p></w:tc></w:tr>';
-
-const LOOP_OPEN_ORIG = "{#lighting_measurements}";
-const LOOP_CLOSE_ORIG = "{/lighting_measurements}";
-
-const LOOP_OPEN_ADMIN = "{#adminMeasurements}";
-const LOOP_CLOSE_ADMIN = "{/adminMeasurements}";
-const LOOP_OPEN_PROD = "{#productionMeasurements}";
-const LOOP_CLOSE_PROD = "{/productionMeasurements}";
-
+/** Find the <w:tr>…</w:tr> span that contains `needle`. */
 function findEnclosingTr(xml, needle) {
   const idx = xml.indexOf(needle);
-  if (idx < 0) throw new Error(`Cannot find marker: ${needle}`);
-  // Find the last "<w:tr " or "<w:tr>" before idx.
-  let trStart = -1;
-  for (const open of ["<w:tr ", "<w:tr>"]) {
-    const i = xml.lastIndexOf(open, idx);
-    if (i > trStart) trStart = i;
-  }
-  if (trStart < 0) throw new Error("No enclosing <w:tr> found");
-  const closeTag = "</w:tr>";
-  const endIdx = xml.indexOf(closeTag, idx);
-  if (endIdx < 0) throw new Error("No </w:tr> after marker");
-  return { start: trStart, end: endIdx + closeTag.length };
+  if (idx < 0) throw new Error(`Marker not found: ${needle}`);
+  const s1 = xml.lastIndexOf("<w:tr ", idx);
+  const s2 = xml.lastIndexOf("<w:tr>", idx);
+  const start = Math.max(s1, s2);
+  if (start < 0) throw new Error(`No enclosing <w:tr> for: ${needle}`);
+  const end = xml.indexOf("</w:tr>", idx) + "</w:tr>".length;
+  if (end < "</w:tr>".length) throw new Error(`No </w:tr> after: ${needle}`);
+  return { start, end, text: xml.slice(start, end) };
+}
+
+/**
+ * Replace the first <w:t>…</w:t> in `rowXml` with a new text node
+ * carrying `placeholder`.  Special XML characters in the placeholder
+ * are escaped.  The replacement node always uses xml:space="preserve"
+ * so leading/trailing spaces in the placeholder are preserved.
+ */
+function buildSectionRow(rowXml, placeholder) {
+  const escaped = placeholder
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+  return rowXml.replace(
+    /<w:t(?:\s[^>]*)?>[\s\S]*?<\/w:t>/,
+    `<w:t xml:space="preserve">${escaped}</w:t>`,
+  );
+}
+
+function countMatches(s, re) {
+  return (s.match(re) || []).length;
 }
 
 function main() {
@@ -97,72 +74,72 @@ function main() {
   const zip = new PizZip(buf);
   const docFile = zip.file("word/document.xml");
   if (!docFile) throw new Error("word/document.xml missing");
-  let xml = docFile.asText();
+  const xml = docFile.asText();
 
-  // Sanity: must contain exactly one loop and a single data row holding it.
-  const openCount = (xml.match(/\{#lighting_measurements\}/g) || []).length;
-  const closeCount = (xml.match(/\{\/lighting_measurements\}/g) || []).length;
-  if (openCount !== 1 || closeCount !== 1) {
-    throw new Error(
-      `Expected one open and one close loop marker; found open=${openCount}, close=${closeCount}.`,
-    );
+  // Verify current template state.
+  for (const marker of [
+    "{#adminMeasurements}",
+    "{/adminMeasurements}",
+    "{#productionMeasurements}",
+    "{/productionMeasurements}",
+  ]) {
+    if (countMatches(xml, new RegExp(marker.replace(/[{}#/]/g, "\\$&"), "g")) !== 1) {
+      throw new Error(`Expected exactly one ${marker} in the template`);
+    }
   }
 
-  const openSpan = findEnclosingTr(xml, LOOP_OPEN_ORIG);
-  const closeSpan = findEnclosingTr(xml, LOOP_CLOSE_ORIG);
-  if (openSpan.start !== closeSpan.start || openSpan.end !== closeSpan.end) {
-    throw new Error(
-      "Loop opener and closer are not in the same <w:tr>; aborting to avoid table damage.",
-    );
+  // Locate the four rows that will be collapsed into two.
+  const sectionRow1 = findEnclosingTr(xml, "1. Административно");
+  const adminDataRow = findEnclosingTr(xml, "{#adminMeasurements}");
+  const sectionRow2 = findEnclosingTr(xml, "2. Производственный");
+  const prodDataRow = findEnclosingTr(xml, "{#productionMeasurements}");
+
+  // Ordering sanity.
+  if (!(sectionRow1.start < adminDataRow.start &&
+        adminDataRow.start < sectionRow2.start &&
+        sectionRow2.start < prodDataRow.start)) {
+    throw new Error("Rows are not in expected order; aborting.");
   }
 
-  const dataRow = xml.slice(openSpan.start, openSpan.end);
+  // Build replacement rows.
+  const newSectionRow = buildSectionRow(
+    sectionRow1.text,
+    "{#measurements}{-w:tr showPlace}{placeNumber}. {placeName}{/}",
+  );
 
-  // Build the admin and production clones by renaming the loop tags
-  // inside the row (no other change — cell widths, paragraph props,
-  // styling are byte-identical to the original).
-  const adminRow = dataRow
-    .replace(LOOP_OPEN_ORIG, LOOP_OPEN_ADMIN)
-    .replace(LOOP_CLOSE_ORIG, LOOP_CLOSE_ADMIN);
-  const prodRow = dataRow
-    .replace(LOOP_OPEN_ORIG, LOOP_OPEN_PROD)
-    .replace(LOOP_CLOSE_ORIG, LOOP_CLOSE_PROD);
+  const newDataRow = adminDataRow.text
+    .replace("{#adminMeasurements}", "")
+    .replace("{/adminMeasurements}", "{/measurements}");
 
-  const replacement =
-    SECTION_ROW_ADMIN + adminRow + SECTION_ROW_PROD + prodRow;
-
+  // Replace the entire 4-row span with the 2 new rows.
+  const regionStart = sectionRow1.start;
+  const regionEnd = prodDataRow.end;
   const newXml =
-    xml.slice(0, openSpan.start) + replacement + xml.slice(openSpan.end);
+    xml.slice(0, regionStart) + newSectionRow + newDataRow + xml.slice(regionEnd);
 
-  // Cheap structural sanity check.
-  const before = {
-    tbl: (xml.match(/<w:tbl>/g) || []).length,
-    tblEnd: (xml.match(/<\/w:tbl>/g) || []).length,
-    tr: (xml.match(/<w:tr[ >]/g) || []).length,
-  };
-  const after = {
-    tbl: (newXml.match(/<w:tbl>/g) || []).length,
-    tblEnd: (newXml.match(/<\/w:tbl>/g) || []).length,
-    tr: (newXml.match(/<w:tr[ >]/g) || []).length,
-  };
-  console.log("Row counts before:", before);
-  console.log("Row counts after :", after);
-  if (before.tbl !== after.tbl || before.tblEnd !== after.tblEnd) {
-    throw new Error("Table count changed — aborting.");
-  }
-  if (after.tr !== before.tr + 3) {
+  // Structural checks.
+  const beforeTr = countMatches(xml, /<w:tr[ >]/g);
+  const afterTr = countMatches(newXml, /<w:tr[ >]/g);
+  const beforeTbl = countMatches(xml, /<w:tbl>/g);
+  const afterTbl = countMatches(newXml, /<w:tbl>/g);
+
+  console.log(`<w:tr> count: ${beforeTr} → ${afterTr} (expected -2)`);
+  console.log(`<w:tbl> count: ${beforeTbl} → ${afterTbl} (expected unchanged)`);
+
+  if (beforeTbl !== afterTbl) throw new Error("Table count changed — aborting.");
+  if (afterTr !== beforeTr - 2) {
     throw new Error(
-      `Expected +3 rows (section1, prod-section, prod-data clone) — got ${after.tr - before.tr}`,
+      `Expected -2 <w:tr> (removed 2 static section rows); got ${afterTr - beforeTr}`,
     );
   }
 
-  // Loop markers must now be exactly the two new pairs and none of the original.
-  if (newXml.includes(LOOP_OPEN_ORIG) || newXml.includes(LOOP_CLOSE_ORIG)) {
-    throw new Error("Original loop markers still present after edit.");
+  // Old markers gone, new markers present.
+  for (const m of ["{#adminMeasurements}", "{/adminMeasurements}", "{#productionMeasurements}", "{/productionMeasurements}"]) {
+    if (newXml.includes(m)) throw new Error(`Old marker still present: ${m}`);
   }
-  for (const m of [LOOP_OPEN_ADMIN, LOOP_CLOSE_ADMIN, LOOP_OPEN_PROD, LOOP_CLOSE_PROD]) {
-    if (!newXml.includes(m)) throw new Error(`Missing replacement marker ${m}`);
-  }
+  if (!newXml.includes("{#measurements}")) throw new Error("Missing {#measurements}");
+  if (!newXml.includes("{/measurements}")) throw new Error("Missing {/measurements}");
+  if (!newXml.includes("{-w:tr showPlace}")) throw new Error("Missing {-w:tr showPlace}");
 
   zip.file("word/document.xml", newXml);
   const out = zip.generate({ type: "nodebuffer" });

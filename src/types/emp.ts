@@ -20,6 +20,7 @@ export interface EmpMeasurement {
 export interface EmpPlace {
   number: number;
   name: string;
+  measurements: EmpMeasurement[];
 }
 
 export interface EmpProtocol {
@@ -44,7 +45,6 @@ export interface EmpProtocol {
   productStandard: string;
   representative: string;
   places: EmpPlace[];
-  emp_measurements: EmpMeasurement[];
   performer: {
     fullName: string;
     position: string;

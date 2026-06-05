@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import { getAttestation } from "@/lib/attestations/repository";
 import { AttestationShell } from "@/components/attestations/AttestationShell";
+import { parseCommonData } from "@/lib/parseCommonData";
 import type { DocumentsData } from "@/components/attestations/AttestationEditor";
 
 /**
@@ -25,6 +26,7 @@ export default async function AttestationDetailPage({
   // safe because the column default is `{}` and the trigger never
   // touches the field.
   const documents = (row.documents_data ?? {}) as DocumentsData;
+  const commonData = parseCommonData(row.common_data);
 
   return (
     <AttestationShell
@@ -34,6 +36,7 @@ export default async function AttestationDetailPage({
       initialCustomerAddress={row.customer_address}
       initialDocuments={documents}
       initialUpdatedAt={row.updated_at}
+      initialCommonData={commonData}
     />
   );
 }

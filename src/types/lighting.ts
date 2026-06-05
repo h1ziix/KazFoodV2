@@ -13,6 +13,7 @@ export interface LightingMeasurement {
 export interface LightingPlace {
   number: number;
   name: string;
+  measurements: LightingMeasurement[];
 }
 
 export interface LightingProtocol {
@@ -43,7 +44,6 @@ export interface LightingProtocol {
     p: string;
   };
   places: LightingPlace[];
-  lighting_measurements: LightingMeasurement[];
   performer: {
     fullName: string;
     position: string;

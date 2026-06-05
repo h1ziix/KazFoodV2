@@ -39,9 +39,8 @@ export const meteoExample: MeteoProtocol = {
     dateYear: "2026",
   },
   customer: {
-    name: "KazEcoFood",
-    address:
-      "Алманиская обл, Карасайский район, село Кокозек, улица Несибели, 715",
+    name: "",
+    address: "",
   },
   measurementDate: {
     day: "10",
@@ -118,10 +117,10 @@ export const meteoExample: MeteoProtocol = {
     },
   ],
   performer: {
-    fullName: "Дьяченко И.С.",
-    position: "Заведующий лабораторией",
+    fullName: "",
+    position: "",
   },
   director: {
-    fullName: "Дьяченко В.Г.",
+    fullName: "",
   },
 };

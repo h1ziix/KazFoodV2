@@ -1,6 +1,7 @@
 import type { EmpMeasurement, EmpProtocol } from "@/types/emp";
 import { renderDocument, TemplateRenderError } from "./docs/engine";
 import { flatten } from "./docs/flatten";
+import { flattenPlacesMeasurements } from "./docs/rows";
 
 const TEMPLATE_URL = "/templates/emp-protocol.docx";
 
@@ -20,21 +21,25 @@ export function buildTemplateContext(
 ): Record<string, unknown> {
   const placesList = data.places.map((p) => `${p.number}. ${p.name}`).join(", ");
 
+  // New dynamic format — requires the rebuilt template with {#measurements}/{-w:tr showPlace}.
+  const measurements = flattenPlacesMeasurements(data.places, flattenMeasurement);
+
+  // Backward-compat: older templates used {#emp_measurements}.
+  const emp_measurements = data.places.flatMap((p) =>
+    p.measurements.map(flattenMeasurement),
+  );
+
   return {
-    ...flatten(data, { skipKeys: ["emp_measurements", "places"] }),
+    ...flatten(data, { skipKeys: ["places"] }),
     placesList,
-    emp_measurements: data.emp_measurements.map(flattenMeasurement),
+    measurements,
+    emp_measurements,
   };
 }
 
 function flattenMeasurement(
   measurement: EmpMeasurement,
 ): Record<string, unknown> {
-  // The template uses fixed range labels ("Диапазон 1" / "Диапазон 2")
-  // matching the reference DOCX, not the frequency text from the
-  // source data. The original measurement.range{1,2}.name values are
-  // preserved on the object for any downstream consumer that still
-  // needs them, but the DOCX template no longer renders them.
   return {
     rowNumber: measurement.rowNumber,
     pointNumber: measurement.pointNumber,
