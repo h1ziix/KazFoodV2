@@ -35,6 +35,7 @@ function m(
   allowed: string,
 ): NoiseMeasurement {
   return {
+    code: "",
     rowNumber,
     pointNumber,
     place,

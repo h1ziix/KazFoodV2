@@ -105,6 +105,7 @@ function m(
   allowed: number,
 ): LightingMeasurement {
   return {
+    code: "",
     rowNumber,
     pointNumber,
     place,

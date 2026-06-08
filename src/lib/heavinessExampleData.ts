@@ -1,17 +1,11 @@
-import type {
-  HeavinessClass,
-  HeavinessIndicator,
-  HeavinessProtocol,
-  HeavinessWorkplace,
-} from "@/types/heaviness";
-
-function ind(value: string, cls: HeavinessClass = "1"): HeavinessIndicator {
-  return { value, class: cls };
-}
+import type { HeavinessProtocol, HeavinessWorkplace } from "@/types/heaviness";
+import { ADMIN_HEAVINESS_NORMATIVE } from "@/lib/heavinessTemplates";
 
 /**
- * Шаблон карточки для административно-управленческого персонала —
- * соответствует "Директору" из исходного DOCX (все показатели — класс 1).
+ * Карточка административно-управленческого персонала — соответствует
+ * "Директору" из исходного DOCX (все показатели — класс 1). Нормативная часть
+ * берётся из общего реестра шаблонов, чтобы пример и синхронизация из кодировки
+ * не расходились.
  */
 function adminWorkplace(
   rowNumber: number,
@@ -23,32 +17,7 @@ function adminWorkplace(
     code,
     position,
     measurementPlace: "Административно – управленческий персонал",
-    workDescription:
-      "самостоятельно осуществлять трудовую деятельность в рамках предоставленных полномочий (нести полную ответственность за результаты своей работы).",
-    finalAssessment: "1 класс – Оптимальный.",
-
-    p1_1_regional: ind("до 2500"),
-    p1_2_general_1to5: ind("до 12500"),
-    p1_2_general_over5: ind("до 24000"),
-
-    p2_1_alternating: ind("до 15"),
-    p2_2_constant: ind("до 5"),
-    p2_3_fromSurface: ind("до 250"),
-    p2_3_fromFloor: ind("до 100"),
-
-    p3_1_local: ind("до 10000"),
-    p3_2_regional: ind("до 10000"),
-
-    p4_1_oneHand: ind("до 12000"),
-    p4_2_twoHands: ind("до 10000"),
-    p4_3_bodyAndLegs: ind("до 43000"),
-
-    p5_pose: ind("Сидя более 60 %", "2"),
-
-    p6_bends: ind("до 50"),
-
-    p7_1_horizontal: ind("до 4 км"),
-    p7_2_vertical: ind("до 2 км"),
+    ...structuredClone(ADMIN_HEAVINESS_NORMATIVE),
   };
 }
 

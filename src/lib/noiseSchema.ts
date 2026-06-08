@@ -26,6 +26,8 @@ const characterSchema = z.object({
 });
 
 const measurementSchema = z.object({
+  // Identity for coding sync; defaulted so pre-existing rows still validate.
+  code: z.string().default(""),
   rowNumber: z.number().int().positive(),
   pointNumber: nonEmpty,
   place: nonEmpty,

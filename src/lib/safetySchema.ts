@@ -6,7 +6,11 @@ const rowSchema = z.object({
   code: nonEmpty,
   position: nonEmpty,
   count: z.number().int().positive(),
-  equipment: nonEmpty,
+  // «Оборудование» — необязательное поле: пользователь заполняет его вручную,
+  // когда есть данные. Пустое значение допустимо и НЕ ломает валидацию,
+  // генерацию DOCX или сохранение. `.optional()` (а не просто z.string())
+  // убирает и красную ошибку, и пометку «обязательное» (*) в форме.
+  equipment: z.string().optional(),
   documentation: nonEmpty,
   result: nonEmpty,
   nonComplianceReasons: nonEmpty,

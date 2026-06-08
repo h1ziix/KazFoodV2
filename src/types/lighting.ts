@@ -1,4 +1,7 @@
 export interface LightingMeasurement {
+  /** Код рабочего места из кодировки — устойчивый идентификатор строки
+   *  при синхронизации (переживает переименование должности). */
+  code: string;
   rowNumber: number;
   pointNumber: string;
   place: string;

@@ -107,6 +107,7 @@ function m(
   range1Magnetic: string,
 ): EmpMeasurement {
   return {
+    code: "",
     rowNumber,
     pointNumber,
     place,

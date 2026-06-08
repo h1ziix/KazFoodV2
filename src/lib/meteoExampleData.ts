@@ -15,6 +15,7 @@ function m(
   humidityAllowed: string,
 ): MeteoMeasurement {
   return {
+    code: "",
     rowNumber,
     pointNumber,
     place,
