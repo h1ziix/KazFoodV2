@@ -29,6 +29,10 @@
 
 import type { CodingRow, CodingSection } from "@/types/coding";
 import {
+  computeSummaryValuesDiff,
+  mergeSummaryValues,
+} from "@/lib/docs/syncSummaryValues";
+import {
   HEAVINESS_WORK_DESCRIPTION,
   resolveHeavinessNormativeByPosition,
   resolveHeavinessNormativeBySection,
@@ -51,6 +55,13 @@ export interface SyncDiff {
   toUpdate: number;
   /** Class A: always []. Class B/C/D: rows that will be permanently removed. */
   toDelete: DeletedItem[];
+  /**
+   * Summary only: actual / norm cells that will be filled or overwritten
+   * from the measurement protocols (lighting / emp / noise / meteo).
+   */
+  valuesToUpdate?: number;
+  /** Summary only: factor rows that will be created from the protocols. */
+  factorsToAdd?: number;
 }
 
 export interface OrphanedPlace {
@@ -138,10 +149,21 @@ export function computeSyncDiff(
   key: string,
   data: unknown,
   sections: CodingSection[],
+  bundle?: Record<string, unknown> | null,
 ): SyncDiff {
   if (CLASS_A_KEYS.has(key)) return diffClassA(data, sections);
   if (key === "safety" || key === "siz") return diffFlatSections(data, sections);
-  if (key === "summary") return diffSummary(data, sections);
+  if (key === "summary") {
+    const structural = diffSummary(data, sections);
+    if (!bundle) return structural;
+    // Values are merged AFTER the structural sync, so the honest count is
+    // computed against the structurally-synced result (new workplaces from
+    // coding receive their values in the same confirmed action).
+    const afterStructural =
+      sections.length > 0 ? syncSummaryPlaces(data, sections) : data;
+    const values = computeSummaryValuesDiff(afterStructural, bundle);
+    return { ...structural, ...values };
+  }
   if (key === "heaviness" || key === "tension") return diffCardWorkplaces(data, sections);
   return { toAdd: 0, toUpdate: 0, toDelete: [] };
 }
@@ -189,12 +211,18 @@ export function syncProtocolFromCoding(
   key: string,
   data: unknown,
   sections: CodingSection[],
+  bundle?: Record<string, unknown> | null,
 ): unknown {
   if (sections.length === 0) return data;
   if (CLASS_A_KEYS.has(key)) return syncMeasurementPlaces(key, data, sections);
   if (key === "safety") return syncSafetyRows(data, sections);
   if (key === "siz") return syncSizRows(data, sections);
-  if (key === "summary") return syncSummaryPlaces(data, sections);
+  if (key === "summary") {
+    // Phase 1 — structure from coding; phase 2 — measured values from the
+    // lighting / emp / noise / meteo slots of the same attestation bundle.
+    const structural = syncSummaryPlaces(data, sections);
+    return bundle ? mergeSummaryValues(structural, bundle) : structural;
+  }
   if (key === "heaviness") return syncHeavinessWorkplaces(data, sections);
   if (key === "tension") return syncTensionWorkplaces(data, sections);
   return data;

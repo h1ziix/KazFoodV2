@@ -181,7 +181,7 @@ export function AttestationEditor({
     );
     const seeded =
       SYNCABLE_KEYS.has(descriptor.key) && codingSections.length > 0
-        ? syncProtocolFromCoding(descriptor.key, seed, codingSections)
+        ? syncProtocolFromCoding(descriptor.key, seed, codingSections, documents)
         : seed;
     onChange({
       ...documents,
@@ -256,13 +256,20 @@ export function AttestationEditor({
 
   function handleSyncRequest() {
     if (!descriptor) return;
-    const diff = computeSyncDiff(descriptor.key, storedValue, codingSections);
+    // The bundle gives the summary access to the lighting / emp / noise /
+    // meteo slots so measured values are pulled in the same action.
+    const diff = computeSyncDiff(descriptor.key, storedValue, codingSections, documents);
     setSyncPending(diff);
   }
 
   function handleSyncConfirm() {
     if (!descriptor || syncPending === null) return;
-    const result = syncProtocolFromCoding(descriptor.key, storedValue, codingSections);
+    const result = syncProtocolFromCoding(
+      descriptor.key,
+      storedValue,
+      codingSections,
+      documents,
+    );
     onChange({ ...documents, [descriptor.key]: result as Json });
     setTouched(true);
     setStatus({ kind: "idle" });
@@ -540,6 +547,8 @@ function SyncConfirmPanel({
   onCancel: () => void;
 }) {
   const hasDeletions = diff.toDelete.length > 0;
+  const valuesToUpdate = diff.valuesToUpdate ?? 0;
+  const factorsToAdd = diff.factorsToAdd ?? 0;
   const itemWord = isClassA
     ? ([" раздел", " раздела", " разделов"] as [string, string, string])
     : ([" строка", " строки", " строк"] as [string, string, string]);
@@ -571,8 +580,34 @@ function SyncConfirmPanel({
               {plural(diff.toDelete.length, itemWord)} удалится
             </span>
           )}
+          {valuesToUpdate > 0 && (
+            <span className="inline-flex items-center gap-1 rounded-full bg-violet-100 px-2.5 py-0.5 text-xs font-medium text-violet-800">
+              {valuesToUpdate}
+              {plural(valuesToUpdate, [
+                " значение",
+                " значения",
+                " значений",
+              ])}{" "}
+              из протоколов
+            </span>
+          )}
+          {factorsToAdd > 0 && (
+            <span className="inline-flex items-center gap-1 rounded-full bg-violet-100 px-2.5 py-0.5 text-xs font-medium text-violet-800">
+              + {factorsToAdd}
+              {plural(factorsToAdd, [" фактор", " фактора", " факторов"])}
+            </span>
+          )}
         </div>
       </div>
+
+      {(valuesToUpdate > 0 || factorsToAdd > 0) && (
+        <p className="text-xs text-slate-500">
+          Показатели «факт» и «норма» подтянутся из протоколов Освещенность,
+          ЭМП, Шум и Микроклимат и перезапишут текущие значения. Пустые
+          значения источников ничего не затирают; класс условий труда не
+          меняется.
+        </p>
+      )}
 
       {isClassA && (
         <p className="text-xs text-slate-500">
