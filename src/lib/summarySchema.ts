@@ -18,6 +18,9 @@ const factorSchema = z.object({
 });
 
 const workplaceSchema = z.object({
+  // Стабильный id строки кодировки — первичный ключ синхронизации; скрыт из
+  // формы. Optional: легаси-строки без него матчатся по коду.
+  codingRowId: z.string().optional(),
   code: nonEmpty,
   profession: nonEmpty,
   count: z.number().int().positive(),

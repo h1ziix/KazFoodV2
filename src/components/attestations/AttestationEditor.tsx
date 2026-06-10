@@ -43,6 +43,18 @@ type Status =
   | { kind: "generated"; message: string };
 
 /**
+ * Run the descriptor's optional normalize pass (pure, idempotent).  For
+ * coding this assigns stable row ids and renumbers positional codes; for
+ * every other document it is a no-op.
+ */
+function applyNormalize(
+  descriptor: { normalize?: (data: unknown) => unknown },
+  data: unknown,
+): unknown {
+  return descriptor.normalize ? descriptor.normalize(data) : data;
+}
+
+/**
  * Per-document state for one attestation.  Keys mirror
  * `DocumentDescriptor.key` ("coding", "safety", …); values are the
  * raw form payload.  Storing `unknown` here keeps the editor agnostic
@@ -100,6 +112,7 @@ export function AttestationEditor({
       descriptor
         ? buildFormDescriptor(descriptor.schema as unknown as ZodTypeAny, {
             skipKeys: descriptor.formSkipKeys,
+            readOnlyKeys: descriptor.formReadOnlyKeys,
           })
         : null,
     [descriptor],
@@ -160,9 +173,11 @@ export function AttestationEditor({
     if (documents[descriptor.key] !== undefined) return;
     if (seededRef.current.has(descriptor.key)) return;
     seededRef.current.add(descriptor.key);
-    const seed = applyCommonToSeed(
-      structuredClone(descriptor.example),
-      commonData ?? null,
+    // normalize (e.g. coding: assign row ids + positional codes) runs before
+    // the seed is stored so the slot never holds an unnormalised snapshot.
+    const seed = applyNormalize(
+      descriptor,
+      applyCommonToSeed(structuredClone(descriptor.example), commonData ?? null),
     );
     const seeded =
       SYNCABLE_KEYS.has(descriptor.key) && codingSections.length > 0
@@ -187,7 +202,12 @@ export function AttestationEditor({
     if (current === undefined) return;
     if (migratedRef.current.has(descriptor.key)) return;
     migratedRef.current.add(descriptor.key);
-    const migrated = migrateDocumentData(descriptor.key, current);
+    // normalize self-heals any slot that reached the client unnormalised
+    // (e.g. coding persisted before positional codes were introduced).
+    const migrated = applyNormalize(
+      descriptor,
+      migrateDocumentData(descriptor.key, current),
+    );
     if (migrated !== current) {
       onChange({ ...documents, [descriptor.key]: migrated as Json });
     }
@@ -211,16 +231,19 @@ export function AttestationEditor({
 
   function handleFieldChange(next: unknown) {
     if (!descriptor) return;
-    onChange({ ...documents, [descriptor.key]: next as Json });
+    // normalize on every change: for coding this performs the full positional
+    // renumbering (ids + codes) after any add / delete / move of rows.
+    const normalized = applyNormalize(descriptor, next);
+    onChange({ ...documents, [descriptor.key]: normalized as Json });
     setTouched(true);
     setStatus({ kind: "idle" });
   }
 
   function handleLoadExample() {
     if (!descriptor) return;
-    const seed = applyCommonToSeed(
-      structuredClone(descriptor.example),
-      commonData ?? null,
+    const seed = applyNormalize(
+      descriptor,
+      applyCommonToSeed(structuredClone(descriptor.example), commonData ?? null),
     );
     onChange({
       ...documents,

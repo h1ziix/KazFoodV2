@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import { getAttestation } from "@/lib/attestations/repository";
 import { AttestationShell } from "@/components/attestations/AttestationShell";
 import { parseCommonData } from "@/lib/parseCommonData";
+import { migrateWorkplaceCodes } from "@/lib/docs/workplaceCodes";
 import type { DocumentsData } from "@/components/attestations/AttestationEditor";
 
 /**
@@ -25,7 +26,16 @@ export default async function AttestationDetailPage({
   // the editor uses a structurally-identical alias.  A direct cast is
   // safe because the column default is `{}` and the trigger never
   // touches the field.
-  const documents = (row.documents_data ?? {}) as DocumentsData;
+  //
+  // migrateWorkplaceCodes runs on the WHOLE bundle before it reaches the
+  // client: coding rows get stable ids and positional codes, and every
+  // dependent protocol is re-stitched to them in the same pass (renumbering
+  // coding without remapping dependents would break the sync links).
+  // Idempotent — clean data passes through unchanged; the result persists
+  // with the next autosave snapshot.
+  const documents = migrateWorkplaceCodes(
+    (row.documents_data ?? {}) as DocumentsData,
+  ) as DocumentsData;
   const commonData = parseCommonData(row.common_data);
 
   return (

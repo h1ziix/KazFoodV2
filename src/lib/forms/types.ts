@@ -26,6 +26,13 @@ export interface FieldBase {
    */
   hidden?: boolean;
   /**
+   * When true, this field is shown as a non-editable computed value.
+   * It stays in the data model and validation; only manual input is
+   * blocked.  Used for derived fields recomputed by the descriptor's
+   * `normalize` pass (e.g. positional workplace codes in Coding).
+   */
+  readOnly?: boolean;
+  /**
    * Default value extracted from a zod `.default(…)` wrapper.
    * `defaultFor` returns this instead of the generic empty-string /
    * zero placeholder so new array rows arrive pre-filled correctly.

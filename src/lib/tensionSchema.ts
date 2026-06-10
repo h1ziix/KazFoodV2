@@ -11,6 +11,9 @@ const indicatorSchema = z.object({
 
 const workplaceSchema = z.object({
   rowNumber: z.number().int().positive(),
+  // Стабильный id строки кодировки — первичный ключ синхронизации; скрыт из
+  // формы. Optional: легаси-карточки без него матчатся по коду.
+  codingRowId: z.string().optional(),
   code: nonEmpty,
   position: nonEmpty,
   measurementPlace: nonEmpty,

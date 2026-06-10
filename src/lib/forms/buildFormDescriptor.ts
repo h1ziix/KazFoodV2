@@ -22,12 +22,18 @@ import type {
  * @param opts.skipKeys  Key names whose corresponding fields are hidden
  *   from the form UI but remain in data and in `defaultItem` for new
  *   array rows.  Matched by key name at every level of the schema tree.
+ * @param opts.readOnlyKeys  Key names rendered as non-editable computed
+ *   values (data stays, typing is blocked).  Same matching semantics as
+ *   `skipKeys`.
  */
 export function buildFormDescriptor(
   schema: ZodTypeAny,
-  opts?: { skipKeys?: readonly string[] },
+  opts?: { skipKeys?: readonly string[]; readOnlyKeys?: readonly string[] },
 ): FormField {
-  const ctx: BuildCtx = { skipKeys: opts?.skipKeys ?? [] };
+  const ctx: BuildCtx = {
+    skipKeys: opts?.skipKeys ?? [],
+    readOnlyKeys: opts?.readOnlyKeys ?? [],
+  };
   return toField("root", schema, /* requiredFromParent */ true, ctx);
 }
 
@@ -37,6 +43,7 @@ export function buildFormDescriptor(
 
 interface BuildCtx {
   readonly skipKeys: readonly string[];
+  readonly readOnlyKeys: readonly string[];
 }
 
 interface ZodDef {
@@ -168,10 +175,12 @@ function buildGroup(
   const shapeFn = defOf(inner).shape as () => Record<string, ZodTypeAny>;
   const shape = shapeFn();
   const children: FormField[] = Object.entries(shape).map(([k, child]) => {
-    const field = toField(k, child, true, ctx);
+    let field = toField(k, child, true, ctx);
     // Mark as hidden without removing from the descriptor tree so that
     // defaultFor() still includes it in defaultItem for new array rows.
-    return ctx.skipKeys.includes(k) ? { ...field, hidden: true } : field;
+    if (ctx.skipKeys.includes(k)) field = { ...field, hidden: true };
+    if (ctx.readOnlyKeys.includes(k)) field = { ...field, readOnly: true };
+    return field;
   });
   return { kind: "group", key, label, required, children };
 }

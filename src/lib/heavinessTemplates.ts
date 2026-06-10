@@ -5,23 +5,21 @@ import type {
 } from "@/types/heaviness";
 
 /**
- * BUSINESS RULE — the workplace CODE is the single source of truth.
+ * BUSINESS RULE — normatives are keyed by SECTION + POSITION, never by code.
  *
- * A position in the Heaviness protocol is identified by its coding `code`
- * (format "XX XXX XXX", e.g. "01 001 015"), never by its name. The code is
- * opaque input from Coding: it is never generated, computed, or derived — the
- * registry keys below are the real codes as they appear in Coding.
+ * The workplace code is a derived positional display value ("01" + section +
+ * row, see workplaceCodes.ts): it is renumbered whenever coding rows are
+ * added / deleted / moved, so pinning a normative to a code would silently
+ * detach it after any structural edit. Cross-protocol row identity lives in
+ * the hidden coding-row id (syncWorkplaces.ts) and is irrelevant here —
+ * normatives describe PROFESSIONS, not concrete rows.
  *
- * Names repeat across the coding («Технолог оператор» = 01 001 013 AND
- * 01 001 014), so the primary registry is keyed by code and matched by EXACT
- * code FIRST during sync. Position/section registries exist only as fallbacks
- * for rows that have no code-pinned norm.
+ * Names repeat across the coding («Технолог оператор» exists in both АУП and
+ * production with different norms), so the most specific registry is keyed by
+ * «секция|должность» (mirrors tensionTemplates) and is checked FIRST. The
+ * plain position map serves unique names; the section map is the fallback.
  *
- * Lookup priority: code (exact) → position → section.
- *
- * When adding a norm that must apply to one specific coding row, put it in
- * `heavinessNormativeByCode` under its real code. Use the name/section maps
- * only for generic norms safe to share across same-named/same-section rows.
+ * Lookup priority: section+position → position → section.
  */
 
 /**
@@ -82,9 +80,9 @@ export const ADMIN_HEAVINESS_NORMATIVE: HeavinessNormative = {
 };
 
 /**
- * Норматив «Технолог оператор» (код 01 001 014, производственный персонал) —
- * по карте тяжести труда все показатели класса 1 (оптимальный). Привязан к
- * коду, а не к названию: одноимённая должность есть и в АУП (01 001 013).
+ * Норматив «Технолог оператор» (производственный персонал) — по карте тяжести
+ * труда все показатели класса 1 (оптимальный). Привязан к «секция+должность»,
+ * а не к одному названию: одноимённая должность есть и в АУП с другим нормативом.
  */
 export const TECHNOLOGIST_OPERATOR_HEAVINESS_NORMATIVE: HeavinessNormative = {
   workDescription: HEAVINESS_WORK_DESCRIPTION,
@@ -115,7 +113,7 @@ export const TECHNOLOGIST_OPERATOR_HEAVINESS_NORMATIVE: HeavinessNormative = {
 };
 
 /**
- * Норматив «Бригадир ремонтно-строительной бригады» (код 01 001 015) — по карте
+ * Норматив «Бригадир ремонтно-строительной бригады» — по карте
  * тяжести труда итог класс 2 (допустимый), часть показателей класса 2.
  */
 export const FOREMAN_REPAIR_HEAVINESS_NORMATIVE: HeavinessNormative = {
@@ -147,7 +145,7 @@ export const FOREMAN_REPAIR_HEAVINESS_NORMATIVE: HeavinessNormative = {
 };
 
 /**
- * Норматив «Бригадир технической бригады» (код 01 001 016) — по карте тяжести
+ * Норматив «Бригадир технической бригады» — по карте тяжести
  * труда итог класс 2 (допустимый), часть показателей класса 2.
  */
 export const FOREMAN_TECHNICAL_HEAVINESS_NORMATIVE: HeavinessNormative = {
@@ -179,7 +177,7 @@ export const FOREMAN_TECHNICAL_HEAVINESS_NORMATIVE: HeavinessNormative = {
 };
 
 /**
- * Норматив «Бригадир цеха выращивания и хранения» (код 01 002 017) — по карте
+ * Норматив «Бригадир цеха выращивания и хранения» — по карте
  * тяжести труда итог класс 2 (допустимый), часть показателей класса 2.
  */
 export const FOREMAN_GROWING_STORAGE_HEAVINESS_NORMATIVE: HeavinessNormative = {
@@ -211,7 +209,7 @@ export const FOREMAN_GROWING_STORAGE_HEAVINESS_NORMATIVE: HeavinessNormative = {
 };
 
 /**
- * Норматив «Электрослесарь» (код 01 002 018) — по карте тяжести труда итог
+ * Норматив «Электрослесарь» — по карте тяжести труда итог
  * класс 2 (допустимый), часть показателей класса 2.
  */
 export const ELECTRICIAN_HEAVINESS_NORMATIVE: HeavinessNormative = {
@@ -242,17 +240,19 @@ export const ELECTRICIAN_HEAVINESS_NORMATIVE: HeavinessNormative = {
   p7_2_vertical: ind("до 2 км", "2"),
 };
 
+/** Название секции производственного персонала — как в кодировке. */
+const SECTION_PRODUCTION = "Производственный персонал";
+
 /**
- * Норматив по коду рабочего места (наивысший приоритет — выше должности, секции
- * и наследования от соседей). Используйте, когда норматив должен быть привязан
- * к конкретной строке кодировки, а не к названию профессии.
+ * Норматив с учётом СЕКЦИИ — для должностей, чьё имя повторяется в разных
+ * секциях с разными профилями (как в tensionTemplates). Проверяется ПЕРЕД
+ * `heavinessNormativeByPosition`. Ключ: «секция|должность» РОВНО как в
+ * кодировке. Коды рабочих мест в качестве ключей запрещены — они позиционные
+ * и перенумеровываются (см. BUSINESS RULE в шапке файла).
  */
-export const heavinessNormativeByCode: Record<string, HeavinessNormative> = {
-  "01 001 014": TECHNOLOGIST_OPERATOR_HEAVINESS_NORMATIVE,
-  "01 001 015": FOREMAN_REPAIR_HEAVINESS_NORMATIVE,
-  "01 001 016": FOREMAN_TECHNICAL_HEAVINESS_NORMATIVE,
-  "01 002 017": FOREMAN_GROWING_STORAGE_HEAVINESS_NORMATIVE,
-  "01 002 018": ELECTRICIAN_HEAVINESS_NORMATIVE,
+export const heavinessNormativeBySectionPosition: Record<string, HeavinessNormative> = {
+  [`${SECTION_PRODUCTION}|Технолог оператор`]:
+    TECHNOLOGIST_OPERATOR_HEAVINESS_NORMATIVE,
 };
 
 /**
@@ -480,6 +480,14 @@ const LAUNDRESS_HEAVINESS_NORMATIVE = laborerHeavinessNormative(
  * в двух написаниях (с пробелом и через дефис), т.к. встречаются оба варианта.
  */
 export const heavinessNormativeByPosition: Record<string, HeavinessNormative> = {
+  // Производственные должности с уникальными именами (бывшие code-pinned
+  // нормативы): «Электро слесарь» зарегистрирован в двух написаниях, т.к.
+  // в кодировке встречается раздельный вариант.
+  "Бригадир ремонтно-строительной бригады": FOREMAN_REPAIR_HEAVINESS_NORMATIVE,
+  "Бригадир технической бригады": FOREMAN_TECHNICAL_HEAVINESS_NORMATIVE,
+  "Бригадир цеха выращивания и хранения": FOREMAN_GROWING_STORAGE_HEAVINESS_NORMATIVE,
+  "Электро слесарь": ELECTRICIAN_HEAVINESS_NORMATIVE,
+  "Электрослесарь": ELECTRICIAN_HEAVINESS_NORMATIVE,
   "Водитель экспедитор": DRIVER_FORWARDER_HEAVINESS_NORMATIVE,
   "Лаборант": LABORATORY_ASSISTANT_HEAVINESS_NORMATIVE,
   "Поливщик": IRRIGATOR_HEAVINESS_NORMATIVE,
@@ -513,19 +521,16 @@ function normalizeKey(value: string): string {
     .replace(/[-–—]/g, "-");
 }
 
-/**
- * Канонизирует ТОЛЬКО пробелы кода (обрезает края, схлопывает повторы) для
- * устойчивого точного сравнения ключей формата "XX XXX XXX". Применяется
- * одинаково к ключам реестра и к коду из кодировки — это эквивалентно точному
- * совпадению, а не вычислению или модификации кода. Сам `code` карточки всегда
- * сохраняется из кодировки как есть и здесь не меняется.
- */
-function normalizeCode(value: string): string {
-  return value.trim().replace(/\s+/g, " ");
+/** Композитный ключ «секция|должность» из нормализованных частей. */
+function sectionPositionKey(sectionTitle: string, position: string): string {
+  return `${normalizeKey(sectionTitle)}|${normalizeKey(position)}`;
 }
 
-const byCodeNormalized = new Map<string, HeavinessNormative>(
-  Object.entries(heavinessNormativeByCode).map(([k, v]) => [normalizeCode(k), v]),
+const bySectionPositionNormalized = new Map<string, HeavinessNormative>(
+  Object.entries(heavinessNormativeBySectionPosition).map(([k, v]) => {
+    const sep = k.indexOf("|");
+    return [sectionPositionKey(k.slice(0, sep), k.slice(sep + 1)), v];
+  }),
 );
 const byPositionNormalized = new Map<string, HeavinessNormative>(
   Object.entries(heavinessNormativeByPosition).map(([k, v]) => [normalizeKey(k), v]),
@@ -535,24 +540,18 @@ const bySectionNormalized = new Map<string, HeavinessNormative>(
 );
 
 /**
- * Норматив, привязанный к конкретному коду рабочего места. Наивысший приоритет:
- * имеет преимущество над наследованием от соседей и над нормативом по
- * должности/секции. `undefined`, если для кода норматив не задан.
- */
-export function resolveHeavinessNormativeByCode(
-  code: string,
-): HeavinessNormative | undefined {
-  return byCodeNormalized.get(normalizeCode(code));
-}
-
-/**
- * Норматив по точному названию должности (профессии). `undefined`, если для
- * должности норматив не задан.
+ * Норматив по должности с учётом секции. Приоритет: точное «секция+должность»
+ * (разводит одноимённые должности из разных секций, напр. «Технолог оператор»),
+ * затем — по одному имени должности. `undefined`, если норматива нет.
  */
 export function resolveHeavinessNormativeByPosition(
   position: string,
+  sectionTitle: string,
 ): HeavinessNormative | undefined {
-  return byPositionNormalized.get(normalizeKey(position));
+  return (
+    bySectionPositionNormalized.get(sectionPositionKey(sectionTitle, position)) ??
+    byPositionNormalized.get(normalizeKey(position))
+  );
 }
 
 /**

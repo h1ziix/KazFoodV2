@@ -9,14 +9,27 @@
  *
  * Class B (Safety, SIZ) / Class C (Summary) / Class D (Heaviness, Tension) —
  *   full structural replacement: rows / workplaces absent from coding are
- *   deleted; existing rows whose code still exists have their identity fields
- *   updated and their protocol-specific data preserved.
+ *   deleted; existing rows whose coding row still exists have their identity
+ *   fields updated and their protocol-specific data preserved.
+ *
+ * ┌─ IDENTITY MODEL ───────────────────────────────────────────────────────────┐
+ * │ The stable identity of a coding row is its hidden `id` (CodingRow.id),      │
+ * │ mirrored on dependent rows as `codingRowId`. The CODE is a derived,         │
+ * │ positional display value ("01" + section + row, see workplaceCodes.ts) and  │
+ * │ is renumbered whenever rows are added / deleted / moved — so it must NEVER  │
+ * │ be the primary matching key.                                                │
+ * │                                                                             │
+ * │ All matching here is two-pass (claimByIdentity): id first, then code only   │
+ * │ among rows not claimed by an id. The code fallback exists solely for        │
+ * │ legacy rows persisted before ids were introduced. On every sync the         │
+ * │ display `code` of matched rows is refreshed from coding and `codingRowId`   │
+ * │ is adopted, so legacy data converges to id-linking after one pass.          │
+ * └─────────────────────────────────────────────────────────────────────────────┘
  */
 
 import type { CodingRow, CodingSection } from "@/types/coding";
 import {
   HEAVINESS_WORK_DESCRIPTION,
-  resolveHeavinessNormativeByCode,
   resolveHeavinessNormativeByPosition,
   resolveHeavinessNormativeBySection,
 } from "@/lib/heavinessTemplates";
@@ -105,7 +118,13 @@ export function extractCodingSections(rawCoding: unknown): CodingSection[] {
         typeof row.name === "string" &&
         typeof row.count === "number"
       ) {
-        rows.push({ code: row.code, name: row.name, count: row.count });
+        const id =
+          typeof row.id === "string" && row.id !== "" ? row.id : undefined;
+        rows.push(
+          id !== undefined
+            ? { id, code: row.code, name: row.name, count: row.count }
+            : { code: row.code, name: row.name, count: row.count },
+        );
       }
     }
     result.push({ number: sec.number, title: sec.title, rows });
@@ -134,46 +153,34 @@ function diffClassA(data: unknown, sections: CodingSection[]): SyncDiff {
   return { toAdd, toUpdate, toDelete: [] };
 }
 
+/** Shared diff for one flat list of existing rows matched via claimByIdentity. */
+function diffByIdentity(
+  sections: CodingSection[],
+  existing: Record<string, unknown>[],
+  nameKey: "position" | "profession",
+): SyncDiff {
+  const { byRow, unclaimed } = claimByIdentity(sections, existing, nameKey);
+  const total = sections.reduce((n, s) => n + s.rows.length, 0);
+  return {
+    toAdd: total - byRow.size,
+    toUpdate: byRow.size,
+    toDelete: unclaimed.map((r) => ({
+      code: codeOf(r),
+      name: typeof r[nameKey] === "string" ? (r[nameKey] as string) : "",
+    })),
+  };
+}
+
 function diffFlatSections(data: unknown, sections: CodingSection[]): SyncDiff {
-  const existingRows = extractSectionRows(data);
-  const codingCodes = new Set(sections.flatMap((s) => s.rows.map((r) => r.code)));
-  const existingCodes = new Set(existingRows.map((r) => r.code));
-
-  const toAdd = sections.flatMap((s) => s.rows).filter((r) => !existingCodes.has(r.code)).length;
-  const toUpdate = sections.flatMap((s) => s.rows).filter((r) => existingCodes.has(r.code)).length;
-  const toDelete = existingRows
-    .filter((r) => !codingCodes.has(r.code))
-    .map((r) => ({ code: r.code, name: r.name }));
-
-  return { toAdd, toUpdate, toDelete };
+  return diffByIdentity(sections, extractFlatSectionRows(data), "position");
 }
 
 function diffSummary(data: unknown, sections: CodingSection[]): SyncDiff {
-  const existingWp = extractSummaryWorkplaces(data);
-  const codingCodes = new Set(sections.flatMap((s) => s.rows.map((r) => r.code)));
-  const existingCodes = new Set(existingWp.map((w) => w.code));
-
-  const toAdd = sections.flatMap((s) => s.rows).filter((r) => !existingCodes.has(r.code)).length;
-  const toUpdate = sections.flatMap((s) => s.rows).filter((r) => existingCodes.has(r.code)).length;
-  const toDelete = existingWp
-    .filter((w) => !codingCodes.has(w.code))
-    .map((w) => ({ code: w.code, name: w.name }));
-
-  return { toAdd, toUpdate, toDelete };
+  return diffByIdentity(sections, extractSummaryWorkplaceRows(data), "profession");
 }
 
 function diffCardWorkplaces(data: unknown, sections: CodingSection[]): SyncDiff {
-  const existingCards = extractCardWorkplaces(data);
-  const codingCodes = new Set(sections.flatMap((s) => s.rows.map((r) => r.code)));
-  const existingCodes = new Set(existingCards.map((c) => c.code));
-
-  const toAdd = sections.flatMap((s) => s.rows).filter((r) => !existingCodes.has(r.code)).length;
-  const toUpdate = sections.flatMap((s) => s.rows).filter((r) => existingCodes.has(r.code)).length;
-  const toDelete = existingCards
-    .filter((c) => !codingCodes.has(c.code))
-    .map((c) => ({ code: c.code, name: c.name }));
-
-  return { toAdd, toUpdate, toDelete };
+  return diffByIdentity(sections, extractWorkplaceCards(data), "position");
 }
 
 // ─── Sync dispatcher ──────────────────────────────────────────────────────────
@@ -199,11 +206,12 @@ export function syncProtocolFromCoding(
  * Unified Class A synchronisation. One algorithm, identical for every
  * position — no position-specific special cases.
  *
- * Identity (Q1): the coding `code`, persisted on every measurement. Existing
- *   rows that predate this scheme are backfilled by matching their position
- *   name to a coding row within the same section. After backfill the code is
- *   authoritative, so a position can be renamed in coding without losing the
- *   data, and the same name in two sections never collides (different codes).
+ * Identity (Q1): the coding row's stable `id`, persisted on every measurement
+ *   as `codingRowId`. Legacy rows are resolved by display code, then by
+ *   position name within the same section, and adopt the id on first sync.
+ *   After that the id is authoritative: codes can be renumbered and positions
+ *   renamed in coding without losing data, and the same name in two sections
+ *   never collides (different ids).
  *
  * Existing rows (Q2 = non-destructive): every stored measurement is kept,
  *   in order. Reducing a count or deleting a position never removes data;
@@ -255,63 +263,65 @@ function syncMeasurementPlaces(
     sectionOccurrence.set(section.title, occurrence + 1);
     const ex = (byName.get(section.title) ?? [])[occurrence];
 
-    // code ← position name, for backfilling rows that predate code identity.
-    const codeByName = new Map<string, string>();
-    for (const cr of section.rows) {
-      const nk = normalizePlaceName(cr.name);
-      if (!codeByName.has(nk)) codeByName.set(nk, cr.code);
-    }
+    // Resolution maps for this section: stable id first, then display code,
+    // then position name (both fallbacks serve rows that predate ids).
+    const resolve = buildSectionResolver(section);
 
-    // Carry every stored row forward (non-destructive), backfilling code.
+    // Carry every stored row forward (non-destructive). Rows that resolve to
+    // a coding row adopt its id and get their display code refreshed (codes
+    // are positional and may have been renumbered since the last sync).
     const existingMeasurements: Record<string, unknown>[] = [];
+    const resolvedCr: (CodingRow | undefined)[] = [];
     if (ex) {
       for (const m of arr(ex.measurements)) {
         if (!isObj(m)) continue;
-        const row = { ...(m as Record<string, unknown>) };
-        if (typeof row.code !== "string" || row.code === "") {
-          const inferred = codeByName.get(
-            normalizePlaceName(String(row.place ?? "")),
-          );
-          if (inferred) row.code = inferred;
-        }
-        existingMeasurements.push(row);
+        const row = m as Record<string, unknown>;
+        const cr = resolve(row);
+        resolvedCr.push(cr);
+        existingMeasurements.push(
+          cr ? { ...row, codingRowId: cr.id ?? "", code: cr.code } : row,
+        );
       }
     }
 
-    // Per-code tally + first row as same-code template; first row of the
-    // section as the fallback (section-level) template.
-    const haveByCode = new Map<string, number>();
-    const firstByCode = new Map<string, Record<string, unknown>>();
+    // Per-coding-row tally + first row as same-workplace template; first row
+    // of the section as the fallback (section-level) template.
+    const haveByCr = new Map<CodingRow, number>();
+    const firstByCr = new Map<CodingRow, Record<string, unknown>>();
     let sectionTemplate: Record<string, unknown> | undefined;
-    for (const row of existingMeasurements) {
-      const code = typeof row.code === "string" ? row.code : "";
-      if (code) {
-        haveByCode.set(code, (haveByCode.get(code) ?? 0) + 1);
-        if (!firstByCode.has(code)) firstByCode.set(code, row);
+    existingMeasurements.forEach((row, i) => {
+      const cr = resolvedCr[i];
+      if (cr) {
+        haveByCr.set(cr, (haveByCr.get(cr) ?? 0) + 1);
+        if (!firstByCr.has(cr)) firstByCr.set(cr, row);
       }
       if (!sectionTemplate) sectionTemplate = row;
-    }
+    });
 
     // rowNumber / pointNumber are assigned by the global renumbering pass
     // after the whole result is built, so the value passed here (0) is just a
     // placeholder and is never read.
     const additional: Record<string, unknown>[] = [];
     for (const cr of section.rows) {
-      const have = haveByCode.get(cr.code) ?? 0;
-      const sameCode = firstByCode.get(cr.code);
+      const have = haveByCr.get(cr) ?? 0;
+      const sameWorkplace = firstByCr.get(cr);
       for (let i = have; i < cr.count; i++) {
-        if (sameCode) {
+        let built: Record<string, unknown>;
+        if (sameWorkplace) {
           // Repetition of an existing workplace → full clone incl. measured.
-          additional.push(buildRow(key, sameCode, 0, cr.code, cr.name, true));
+          built = buildRow(key, sameWorkplace, 0, cr.code, cr.name, true);
         } else if (sectionTemplate) {
           // Position new to a populated section → inherit the first row of
           // THIS section, including its measured reading (positions in one
           // section share the same category/conditions, e.g. all АУП = А-1).
-          additional.push(buildRow(key, sectionTemplate, 0, cr.code, cr.name, true));
+          built = buildRow(key, sectionTemplate, 0, cr.code, cr.name, true);
         } else {
           // Empty section → blank default, nothing to inherit from.
-          additional.push(buildRow(key, undefined, 0, cr.code, cr.name, false));
+          built = buildRow(key, undefined, 0, cr.code, cr.name, false);
         }
+        // The id must always be stamped explicitly: templates are clones of
+        // OTHER rows and would otherwise leak their own codingRowId.
+        additional.push({ ...built, codingRowId: cr.id ?? "" });
       }
     }
 
@@ -563,17 +573,17 @@ const SAFETY_NEW_ROW_DEFAULTS = {
 function syncSafetyRows(data: unknown, sections: CodingSection[]): unknown {
   if (!isObj(data)) return data;
   const d = data as Record<string, unknown>;
-  const byCode = flattenSectionRowsByCode(d);
+  const { byRow } = claimByIdentity(sections, extractFlatSectionRows(d));
 
   const newSections = sections.map((section) => ({
     number: section.number,
     title: `${section.number}. ${section.title}`,
     rows: section.rows.map((cr) => {
-      const ex = byCode.get(cr.code);
+      const ex = byRow.get(cr);
       return ex
-        ? { ...ex, code: cr.code, position: cr.name, count: cr.count }
+        ? { ...ex, ...linkFields(cr), position: cr.name, count: cr.count }
         : {
-            code: cr.code,
+            ...linkFields(cr),
             position: cr.name,
             count: cr.count,
             ...SAFETY_NEW_ROW_DEFAULTS,
@@ -608,17 +618,17 @@ const SIZ_NEW_ROW_DEFAULTS = {
 function syncSizRows(data: unknown, sections: CodingSection[]): unknown {
   if (!isObj(data)) return data;
   const d = data as Record<string, unknown>;
-  const byCode = flattenSectionRowsByCode(d);
+  const { byRow } = claimByIdentity(sections, extractFlatSectionRows(d));
 
   const newSections = sections.map((section) => ({
     number: section.number,
     title: `${section.number}. ${section.title}`,
     rows: section.rows.map((cr) => {
-      const ex = byCode.get(cr.code);
+      const ex = byRow.get(cr);
       return ex
-        ? { ...ex, code: cr.code, position: cr.name, count: cr.count }
+        ? { ...ex, ...linkFields(cr), position: cr.name, count: cr.count }
         : {
-            code: cr.code,
+            ...linkFields(cr),
             position: cr.name,
             count: cr.count,
             ...SIZ_NEW_ROW_DEFAULTS,
@@ -634,24 +644,20 @@ function syncSizRows(data: unknown, sections: CodingSection[]): unknown {
 function syncSummaryPlaces(data: unknown, sections: CodingSection[]): unknown {
   if (!isObj(data)) return data;
   const d = data as Record<string, unknown>;
-  const byCode = new Map<string, Record<string, unknown>>();
-  for (const pl of arr(d.places)) {
-    if (!isObj(pl)) continue;
-    for (const wp of arr((pl as Record<string, unknown>).workplaces)) {
-      if (!isObj(wp)) continue;
-      const w = wp as Record<string, unknown>;
-      if (typeof w.code === "string") byCode.set(w.code, w);
-    }
-  }
+  const { byRow } = claimByIdentity(
+    sections,
+    extractSummaryWorkplaceRows(d),
+    "profession",
+  );
 
   const newPlaces = sections.map((section) => ({
     number: section.number,
     name: section.title,
     workplaces: section.rows.map((cr) => {
-      const ex = byCode.get(cr.code);
+      const ex = byRow.get(cr);
       return ex
-        ? { ...ex, code: cr.code, profession: cr.name, count: cr.count }
-        : { code: cr.code, profession: cr.name, count: cr.count, factors: [] };
+        ? { ...ex, ...linkFields(cr), profession: cr.name, count: cr.count }
+        : { ...linkFields(cr), profession: cr.name, count: cr.count, factors: [] };
     }),
   }));
 
@@ -662,23 +668,23 @@ function syncSummaryPlaces(data: unknown, sections: CodingSection[]): unknown {
 
 /**
  * ┌─ BUSINESS RULE — DO NOT BREAK ─────────────────────────────────────────────┐
- * │ The workplace CODE is the single source of truth for a position in the      │
- * │ Heaviness (and Tension) protocol. It is the ONLY stable identifier.         │
+ * │ The coding row's stable `id` (mirrored as `codingRowId`) is the single      │
+ * │ source of truth for a position in the Heaviness (and Tension) protocol.     │
  * │                                                                             │
- * │ • The code comes verbatim from Coding in the format "XX XXX XXX"            │
- * │   (e.g. "01 001 015"). It is opaque input data: it is NEVER generated,      │
- * │   computed from rowNumber, derived from position order, or built from       │
- * │   ranges. Whatever Coding sends is carried through unchanged.               │
- * │ • The position NAME is display data, NOT a key. Names repeat across the      │
- * │   coding (e.g. «Технолог оператор» exists as both 01 001 013 and            │
- * │   01 001 014), so matching by name would silently cross-contaminate cards.  │
- * │ • Therefore ALL sync matching is by code: existing cards are paired via     │
- * │   `cardsByCode`, and the normative template is looked up by exact code      │
- * │   FIRST (`resolveHeavinessNormativeByCode`) before any name/section         │
- * │   fallback. Registry keys are the real codes from Coding.                   │
+ * │ • The CODE is a derived, positional display value ("01" + section + row,    │
+ * │   see workplaceCodes.ts). It is renumbered when rows are added / deleted /  │
+ * │   moved, so matching by code would shift user data onto neighbouring        │
+ * │   positions after any structural edit. Code matching exists ONLY as the     │
+ * │   legacy fallback inside claimByIdentity for cards that predate ids.        │
+ * │ • The position NAME is display data, NOT a key. Names repeat across the     │
+ * │   coding (e.g. «Технолог оператор» exists in both АУП and production), so   │
+ * │   matching by name would silently cross-contaminate cards.                  │
+ * │ • Normative templates are keyed by section+position name                    │
+ * │   (`resolveHeavinessNormativeByPosition`) — they may not be keyed by code,  │
+ * │   because positional codes are client-specific and unstable by design.     │
  * │                                                                             │
- * │ If you add new matching logic here, key it on `code` (exact match). Never    │
- * │ make `position`/`name` the primary key, and never synthesise a code.        │
+ * │ If you add new matching logic here, key it on `codingRowId` (exact match).  │
+ * │ Never make `position`/`name`/`code` the primary key.                        │
  * └─────────────────────────────────────────────────────────────────────────────┘
  */
 
@@ -719,26 +725,28 @@ function defaultHeaviness(
 /**
  * Heaviness sync with normative inheritance.
  *
- * IDENTITY IS THE CODE (see the BUSINESS RULE block above). Cards are matched to
- * coding rows strictly by `code` — never by position name. `position` /
- * `measurementPlace` are refreshed from coding as display data only.
+ * IDENTITY IS THE CODING-ROW ID (see the BUSINESS RULE block above). Cards are
+ * matched to coding rows via claimByIdentity — id first, legacy code fallback.
+ * `code` / `position` / `measurementPlace` are refreshed from coding as
+ * display data only.
  *
  * The normative part (workDescription, finalAssessment, 17 indicators) of a NEW
- * card is filled, in priority order — code first, fallbacks after:
- *   1. existing card with the same CODE → preserved verbatim (user's data);
- *   2. a CODE-pinned normative from the registry → applied automatically and
- *      beats everything below (the value is tied to that exact coding row);
- *   3. a normative pinned to the POSITION name → applied to every card of that
- *      profession, beating generic sibling inheritance;
- *   4. an already-filled sibling card in the same section → inherited (so the
+ * card is filled, in priority order:
+ *   1. existing card claimed by the same coding row → preserved verbatim
+ *      (user's data);
+ *   2. a normative pinned to the POSITION (section-aware: «секция+должность»
+ *      first, then plain position name) → applied, beating generic sibling
+ *      inheritance. Section-aware keys disambiguate same-named positions in
+ *      different sections (e.g. «Технолог оператор» АУП ≠ производство);
+ *   3. an already-filled sibling card in the same section → inherited (so the
  *      user fills one position and the rest of the section follows on re-sync);
- *   5. a predefined normative by section → applied;
- *   6. otherwise a blank default (no template exists — empty is allowed).
+ *   4. a predefined normative by section → applied;
+ *   5. otherwise a blank default (no template exists — empty is allowed).
  */
 function syncHeavinessWorkplaces(data: unknown, sections: CodingSection[]): unknown {
   if (!isObj(data)) return data;
   const d = data as Record<string, unknown>;
-  const byCode = cardsByCode(d);
+  const { byRow } = claimByIdentity(sections, extractWorkplaceCards(d));
   const siblingBySection = firstCardBySection(d);
 
   let rowNumber = 1;
@@ -747,20 +755,19 @@ function syncHeavinessWorkplaces(data: unknown, sections: CodingSection[]): unkn
     const sibling = siblingBySection.get(normalizePlaceName(section.title));
     for (const cr of section.rows) {
       const n = rowNumber++;
-      const ex = byCode.get(cr.code);
+      const ex = byRow.get(cr);
       if (ex) {
-        workplaces.push({ ...ex, rowNumber: n, code: cr.code, position: cr.name, measurementPlace: section.title });
+        workplaces.push({ ...ex, rowNumber: n, ...linkFields(cr), position: cr.name, measurementPlace: section.title });
         continue;
       }
       const normative =
-        resolveHeavinessNormativeByCode(cr.code) ??
-        resolveHeavinessNormativeByPosition(cr.name) ??
+        resolveHeavinessNormativeByPosition(cr.name, section.title) ??
         sibling ??
         resolveHeavinessNormativeBySection(section.title);
       workplaces.push(
         normative
-          ? { ...cloneCard(normative), rowNumber: n, code: cr.code, position: cr.name, measurementPlace: section.title }
-          : defaultHeaviness(n, cr.code, cr.name, section.title),
+          ? { ...cloneCard(normative), rowNumber: n, ...linkFields(cr), position: cr.name, measurementPlace: section.title }
+          : { ...defaultHeaviness(n, cr.code, cr.name, section.title), ...linkFields(cr) },
       );
     }
   }
@@ -816,17 +823,17 @@ function defaultTension(
 /**
  * Tension sync with normative inheritance.
  *
- * IDENTITY IS THE CODE (same rule as heaviness): existing cards are matched to
- * coding rows strictly by `code`; `position` / `measurementPlace` are refreshed
- * from coding as display data only.
+ * IDENTITY IS THE CODING-ROW ID (same rule as heaviness): existing cards are
+ * matched via claimByIdentity — id first, legacy code fallback. `code` /
+ * `position` / `measurementPlace` are refreshed from coding as display data.
  *
  * The normative part of a NEW card is filled, in priority order:
- *   1. existing card with the same CODE → preserved verbatim (user's data);
+ *   1. existing card claimed by the same coding row → preserved verbatim;
  *   2. a normative pinned to the POSITION (section-aware: «секция+должность»
- *      first, then plain position name) → applied. Unlike heaviness this uses
- *      section+position instead of code, because tension profiles differ per
- *      profession (a whole section is NOT one profile), and coding codes are
- *      client-specific so they can't pin the reference profiles;
+ *      first, then plain position name) → applied. Section+position is used
+ *      because tension profiles differ per profession (a whole section is NOT
+ *      one profile), and positional codes are client-specific and unstable so
+ *      they can't pin the reference profiles;
  *   3. an already-filled sibling card in the same section → inherited;
  *   4. a normative by section → applied;
  *   5. otherwise a blank default (finalAssessment empty → flags for attention).
@@ -838,7 +845,7 @@ function defaultTension(
 function syncTensionWorkplaces(data: unknown, sections: CodingSection[]): unknown {
   if (!isObj(data)) return data;
   const d = data as Record<string, unknown>;
-  const byCode = cardsByCode(d);
+  const { byRow } = claimByIdentity(sections, extractWorkplaceCards(d));
   const siblingBySection = firstCardBySection(d);
 
   let rowNumber = 1;
@@ -847,9 +854,9 @@ function syncTensionWorkplaces(data: unknown, sections: CodingSection[]): unknow
     const sibling = siblingBySection.get(normalizePlaceName(section.title));
     for (const cr of section.rows) {
       const n = rowNumber++;
-      const ex = byCode.get(cr.code);
+      const ex = byRow.get(cr);
       if (ex) {
-        workplaces.push({ ...ex, rowNumber: n, code: cr.code, position: cr.name, measurementPlace: section.title });
+        workplaces.push({ ...ex, rowNumber: n, ...linkFields(cr), position: cr.name, measurementPlace: section.title });
         continue;
       }
       const normative =
@@ -858,8 +865,8 @@ function syncTensionWorkplaces(data: unknown, sections: CodingSection[]): unknow
         resolveTensionNormativeBySection(section.title);
       workplaces.push(
         normative
-          ? { ...cloneCard(normative), rowNumber: n, code: cr.code, position: cr.name, measurementPlace: section.title }
-          : defaultTension(n, cr.code, cr.name, section.title),
+          ? { ...cloneCard(normative), rowNumber: n, ...linkFields(cr), position: cr.name, measurementPlace: section.title }
+          : { ...defaultTension(n, cr.code, cr.name, section.title), ...linkFields(cr) },
       );
     }
   }
@@ -928,28 +935,23 @@ export function getOrphanedMeasurements(
     const section = (sectionsByTitle.get(title) ?? [])[idx];
     if (!section) continue; // whole-place orphan — reported elsewhere
 
-    const requiredByCode = new Map<string, number>();
-    const codeByName = new Map<string, string>();
-    for (const cr of section.rows) {
-      requiredByCode.set(cr.code, cr.count);
-      const nk = normalizePlaceName(cr.name);
-      if (!codeByName.has(nk)) codeByName.set(nk, cr.code);
-    }
+    // Same resolution order as the sync itself: id → code → name.
+    const resolve = buildSectionResolver(section);
 
-    const seenByCode = new Map<string, number>();
+    const seenByCr = new Map<CodingRow, number>();
     for (const m of arr(place.measurements)) {
       if (!isObj(m)) continue;
       const row = m as Record<string, unknown>;
-      let code = typeof row.code === "string" ? row.code : "";
-      if (!code) {
-        code = codeByName.get(normalizePlaceName(String(row.place ?? ""))) ?? "";
-      }
-      const required = requiredByCode.get(code);
-      const n = (seenByCode.get(code) ?? 0) + 1;
-      seenByCode.set(code, n);
+      const cr = resolve(row);
 
-      const reason: OrphanedMeasurement["reason"] | null =
-        required === undefined ? "removed" : n > required ? "surplus" : null;
+      let reason: OrphanedMeasurement["reason"] | null = null;
+      if (!cr) {
+        reason = "removed";
+      } else {
+        const n = (seenByCr.get(cr) ?? 0) + 1;
+        seenByCr.set(cr, n);
+        if (n > cr.count) reason = "surplus";
+      }
       if (!reason) continue;
 
       out.push({
@@ -1009,55 +1011,161 @@ function extractPlaceNames(data: unknown): string[] {
   });
 }
 
-function flattenSectionRowsByCode(
-  d: Record<string, unknown>,
-): Map<string, Record<string, unknown>> {
-  const map = new Map<string, Record<string, unknown>>();
-  for (const sec of arr(d.sections)) {
-    if (!isObj(sec)) continue;
-    for (const row of arr((sec as Record<string, unknown>).rows)) {
-      if (!isObj(row)) continue;
-      const r = row as Record<string, unknown>;
-      if (typeof r.code === "string") map.set(r.code, r);
-    }
-  }
-  return map;
+/** Existing row's coding-row link (codingRowId), "" when absent. */
+function linkIdOf(row: Record<string, unknown>): string {
+  return typeof row.codingRowId === "string" ? row.codingRowId : "";
 }
 
-function extractSectionRows(data: unknown): Array<{ code: string; name: string }> {
+/** Existing row's display code, "" when absent. */
+function codeOf(row: Record<string, unknown>): string {
+  return typeof row.code === "string" ? row.code : "";
+}
+
+/** Identity fields stamped from a coding row onto a dependent row. */
+function linkFields(cr: CodingRow): Record<string, unknown> {
+  return cr.id !== undefined
+    ? { codingRowId: cr.id, code: cr.code }
+    : { code: cr.code };
+}
+
+/**
+ * Two-pass matching of existing protocol rows to coding rows.
+ *
+ * Pass 1 — stable identity: a row whose `codingRowId` equals a coding row's
+ *   `id` belongs to that coding row regardless of its display code. This is
+ *   what keeps user data pinned to its position when codes are renumbered:
+ *   deleting or moving a coding row never shifts neighbours' data.
+ * Pass 2 — code fallback for rows without a live id link (legacy rows, or
+ *   rows whose ids point to a re-created coding). The fallback is guarded by
+ *   the position NAME: positional codes are reassigned to neighbours after a
+ *   deletion, so a bare code match could hand one position's data to another.
+ *   A code match with a different name is rejected. Duplicate codes pair
+ *   positionally (Nth ↔ Nth).
+ *
+ * Returns the per-coding-row claim map plus the unclaimed leftovers (the
+ * delete candidates for Class B/C/D).
+ */
+function claimByIdentity(
+  sections: readonly CodingSection[],
+  existing: readonly Record<string, unknown>[],
+  nameKey: "position" | "profession" = "position",
+): {
+  byRow: Map<CodingRow, Record<string, unknown>>;
+  unclaimed: Record<string, unknown>[];
+} {
+  const crs = sections.flatMap((s) => s.rows);
+  const byRow = new Map<CodingRow, Record<string, unknown>>();
+  const claimed = new Set<Record<string, unknown>>();
+
+  const byId = new Map<string, Record<string, unknown>>();
+  for (const item of existing) {
+    const id = linkIdOf(item);
+    if (id !== "" && !byId.has(id)) byId.set(id, item);
+  }
+  for (const cr of crs) {
+    if (cr.id === undefined) continue;
+    const item = byId.get(cr.id);
+    if (item !== undefined && !claimed.has(item)) {
+      byRow.set(cr, item);
+      claimed.add(item);
+    }
+  }
+
+  const byCode = new Map<string, Record<string, unknown>[]>();
+  for (const item of existing) {
+    if (claimed.has(item)) continue;
+    const code = codeOf(item);
+    if (code === "") continue;
+    const bucket = byCode.get(code);
+    if (bucket) bucket.push(item);
+    else byCode.set(code, [item]);
+  }
+  for (const cr of crs) {
+    if (byRow.has(cr)) continue;
+    const bucket = byCode.get(cr.code);
+    if (!bucket) continue;
+    const crName = normalizePlaceName(cr.name);
+    const idx = bucket.findIndex((item) => {
+      const name = item[nameKey];
+      // Malformed rows without a name are accepted by code alone.
+      if (typeof name !== "string" || name === "") return true;
+      return normalizePlaceName(name) === crName;
+    });
+    if (idx === -1) continue;
+    const [item] = bucket.splice(idx, 1);
+    byRow.set(cr, item);
+    claimed.add(item);
+  }
+
+  return { byRow, unclaimed: existing.filter((i) => !claimed.has(i)) };
+}
+
+/**
+ * Per-section resolver for Class A measurement rows: stable id first, then
+ * code+name, then position name alone (the fallbacks serve rows without a
+ * live id link). The code fallback is name-guarded for the same reason as in
+ * claimByIdentity: positional codes migrate to neighbouring rows after a
+ * deletion, so a bare code match would attribute an orphaned measurement to
+ * whichever position inherited its code. Returns the coding row a
+ * measurement belongs to, if any.
+ */
+function buildSectionResolver(
+  section: CodingSection,
+): (row: Record<string, unknown>) => CodingRow | undefined {
+  const byId = new Map<string, CodingRow>();
+  const byCodeAndName = new Map<string, CodingRow>();
+  const byName = new Map<string, CodingRow>();
+  for (const cr of section.rows) {
+    if (cr.id !== undefined && !byId.has(cr.id)) byId.set(cr.id, cr);
+    const nk = normalizePlaceName(cr.name);
+    const ck = `${cr.code}|${nk}`;
+    if (!byCodeAndName.has(ck)) byCodeAndName.set(ck, cr);
+    if (!byName.has(nk)) byName.set(nk, cr);
+  }
+  return (row) => {
+    const id = linkIdOf(row);
+    if (id !== "") {
+      const cr = byId.get(id);
+      if (cr) return cr;
+    }
+    const nk = normalizePlaceName(String(row.place ?? ""));
+    const code = codeOf(row);
+    if (code !== "") {
+      const cr = byCodeAndName.get(`${code}|${nk}`);
+      if (cr) return cr;
+    }
+    return byName.get(nk);
+  };
+}
+
+/** All safety / siz rows as one flat list of raw row objects. */
+function extractFlatSectionRows(data: unknown): Record<string, unknown>[] {
   if (!isObj(data)) return [];
   return arr((data as Record<string, unknown>).sections).flatMap((sec) => {
     if (!isObj(sec)) return [];
-    return arr((sec as Record<string, unknown>).rows).flatMap((row) => {
-      if (!isObj(row)) return [];
-      const r = row as Record<string, unknown>;
-      if (typeof r.code !== "string") return [];
-      return [{ code: r.code, name: typeof r.position === "string" ? r.position : "" }];
-    });
+    return arr((sec as Record<string, unknown>).rows).flatMap((row) =>
+      isObj(row) ? [row as Record<string, unknown>] : [],
+    );
   });
 }
 
-function extractSummaryWorkplaces(data: unknown): Array<{ code: string; name: string }> {
+/** All summary workplaces as one flat list of raw row objects. */
+function extractSummaryWorkplaceRows(data: unknown): Record<string, unknown>[] {
   if (!isObj(data)) return [];
   return arr((data as Record<string, unknown>).places).flatMap((pl) => {
     if (!isObj(pl)) return [];
-    return arr((pl as Record<string, unknown>).workplaces).flatMap((wp) => {
-      if (!isObj(wp)) return [];
-      const w = wp as Record<string, unknown>;
-      if (typeof w.code !== "string") return [];
-      return [{ code: w.code, name: typeof w.profession === "string" ? w.profession : "" }];
-    });
+    return arr((pl as Record<string, unknown>).workplaces).flatMap((wp) =>
+      isObj(wp) ? [wp as Record<string, unknown>] : [],
+    );
   });
 }
 
-function cardsByCode(d: Record<string, unknown>): Map<string, Record<string, unknown>> {
-  const map = new Map<string, Record<string, unknown>>();
-  for (const wp of arr(d.workplaces)) {
-    if (!isObj(wp)) continue;
-    const w = wp as Record<string, unknown>;
-    if (typeof w.code === "string") map.set(w.code, w);
-  }
-  return map;
+/** All heaviness / tension cards as one flat list of raw card objects. */
+function extractWorkplaceCards(data: unknown): Record<string, unknown>[] {
+  if (!isObj(data)) return [];
+  return arr((data as Record<string, unknown>).workplaces).flatMap((wp) =>
+    isObj(wp) ? [wp as Record<string, unknown>] : [],
+  );
 }
 
 /**
@@ -1087,16 +1195,6 @@ function firstCardBySection(
  */
 function cloneCard(source: object): Record<string, unknown> {
   return structuredClone(source) as Record<string, unknown>;
-}
-
-function extractCardWorkplaces(data: unknown): Array<{ code: string; name: string }> {
-  if (!isObj(data)) return [];
-  return arr((data as Record<string, unknown>).workplaces).flatMap((wp) => {
-    if (!isObj(wp)) return [];
-    const w = wp as Record<string, unknown>;
-    if (typeof w.code !== "string") return [];
-    return [{ code: w.code, name: typeof w.position === "string" ? w.position : "" }];
-  });
 }
 
 /**

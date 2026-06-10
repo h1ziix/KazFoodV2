@@ -4,7 +4,10 @@ const nonEmpty = z.string().min(1, "не должно быть пустым");
 const optStr = z.string();
 
 const measurementSchema = z.object({
-  // Identity for coding sync; defaulted so pre-existing rows still validate.
+  // Stable coding-row id — primary sync key; hidden in the form. Defaulted so
+  // pre-existing rows still validate; legacy rows match by code/name instead.
+  codingRowId: z.string().default(""),
+  // Display code from coding (derived value, refreshed on sync).
   code: z.string().default(""),
   rowNumber: z.number().int().positive(),
   pointNumber: nonEmpty,

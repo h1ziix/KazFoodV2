@@ -3,6 +3,7 @@ import type PizZip from "pizzip";
 import { renderDocument } from "./engine";
 import { restartListNumberingPerLoop } from "./numberingRestart";
 import { injectCommonData } from "./commonDataInjector";
+import { normalizeCodingDocument } from "./workplaceCodes";
 import type { CommonData } from "@/types/common";
 
 // Schemas (single-source-of-truth: per-document zod files)
@@ -113,9 +114,30 @@ export interface DocumentDescriptor<TInput> {
    * `.default(…)` so newly added array rows arrive with correct values.
    *
    * Used by the Noise protocol to hide octave bands, character flags,
-   * and other columns the user fills directly in the DOCX.
+   * and other columns the user fills directly in the DOCX; used by every
+   * coding-synced protocol to hide the `codingRowId` link field.
    */
   formSkipKeys?: readonly string[];
+  /**
+   * Field keys rendered as non-editable computed values in the form UI.
+   * The fields stay in the data model and are recomputed by `normalize`;
+   * the user sees them but cannot type into them.  Matched by key name at
+   * every level of the schema tree (same semantics as `formSkipKeys`).
+   *
+   * Used by Coding for `code` / section `number`, which are derived from
+   * row / section positions.
+   */
+  formReadOnlyKeys?: readonly string[];
+  /**
+   * Optional normalisation pass applied to the raw form value after every
+   * change, after seeding from the example, and after data migration —
+   * BEFORE the value is stored or validated.  Must be pure and idempotent.
+   *
+   * Used by Coding to assign stable row ids and renumber positional codes
+   * (workplaceCodes.ts) so add / delete / move always triggers a full,
+   * automatic renumbering and the user never types codes by hand.
+   */
+  normalize?: (data: unknown) => unknown;
 }
 
 /**
@@ -184,6 +206,8 @@ export const DOCUMENT_REGISTRY: DocumentDescriptor<unknown>[] = [
     example: lightingExample,
     buildContext: lightingCtx,
     filename: (d) => `Освещенность_${d.protocol.number}.docx`,
+    // Hidden coding-row link used by sync; never edited by hand.
+    formSkipKeys: ["codingRowId"],
   }),
   describe<EmpProtocol>({
     key: "emp",
@@ -193,6 +217,8 @@ export const DOCUMENT_REGISTRY: DocumentDescriptor<unknown>[] = [
     example: empExample,
     buildContext: empCtx,
     filename: (d) => `ЭМП_${d.protocol.number}.docx`,
+    // Hidden coding-row link used by sync; never edited by hand.
+    formSkipKeys: ["codingRowId"],
   }),
   describe<NoiseProtocol>({
     key: "noise",
@@ -212,6 +238,8 @@ export const DOCUMENT_REGISTRY: DocumentDescriptor<unknown>[] = [
       "ppeAbsent",
       "sourceStationary",
       "sourceNonStationary",
+      // Hidden coding-row link used by sync; never edited by hand.
+      "codingRowId",
     ],
   }),
   describe<HeavinessProtocol>({
@@ -225,6 +253,8 @@ export const DOCUMENT_REGISTRY: DocumentDescriptor<unknown>[] = [
     // Template carries __NUMID_*_SLOT_*__ sentinels inside the
     // {#workplaces} loop; must be resolved post-render or Word rejects.
     postProcess: restartListNumberingPerLoop,
+    // Hidden coding-row link used by sync; never edited by hand.
+    formSkipKeys: ["codingRowId"],
   }),
   describe<TensionProtocol>({
     key: "tension",
@@ -236,6 +266,8 @@ export const DOCUMENT_REGISTRY: DocumentDescriptor<unknown>[] = [
     filename: (d) => `Напряженность_${d.protocol.number}.docx`,
     // Same sentinel scheme as heaviness — required.
     postProcess: restartListNumberingPerLoop,
+    // Hidden coding-row link used by sync; never edited by hand.
+    formSkipKeys: ["codingRowId"],
   }),
   describe<SafetyProtocol>({
     key: "safety",
@@ -245,6 +277,8 @@ export const DOCUMENT_REGISTRY: DocumentDescriptor<unknown>[] = [
     example: safetyExample,
     buildContext: safetyCtx,
     filename: (d) => `Травмобезопасность_${d.protocol.number}.docx`,
+    // Hidden coding-row link used by sync; never edited by hand.
+    formSkipKeys: ["codingRowId"],
   }),
   describe<SizProtocol>({
     key: "siz",
@@ -254,6 +288,8 @@ export const DOCUMENT_REGISTRY: DocumentDescriptor<unknown>[] = [
     example: sizExample,
     buildContext: sizCtx,
     filename: (d) => `СИЗ_${d.protocol.number}.docx`,
+    // Hidden coding-row link used by sync; never edited by hand.
+    formSkipKeys: ["codingRowId"],
   }),
   describe<MeteoProtocol>({
     key: "meteo",
@@ -263,6 +299,8 @@ export const DOCUMENT_REGISTRY: DocumentDescriptor<unknown>[] = [
     example: meteoExample,
     buildContext: meteoCtx,
     filename: (d) => `Микроклимат_${d.protocol.number}.docx`,
+    // Hidden coding-row link used by sync; never edited by hand.
+    formSkipKeys: ["codingRowId"],
   }),
   describe<SummaryProtocol>({
     key: "summary",
@@ -272,6 +310,8 @@ export const DOCUMENT_REGISTRY: DocumentDescriptor<unknown>[] = [
     example: summaryExample,
     buildContext: summaryCtx,
     filename: (d) => `Сводный_протокол_${d.protocol.number}.docx`,
+    // Hidden coding-row link used by sync; never edited by hand.
+    formSkipKeys: ["codingRowId"],
   }),
   describe<ConclusionProtocol>({
     key: "conclusion",
@@ -291,6 +331,12 @@ export const DOCUMENT_REGISTRY: DocumentDescriptor<unknown>[] = [
     buildContext: codingCtx,
     filename: (d) =>
       `Кодировка_${d.approval.organization.replace(/[«»"\\/]+/g, "")}.docx`,
+    // Stable row identity is internal — never shown or edited.
+    formSkipKeys: ["id"],
+    // Codes and section numbers are positional derived values: visible in
+    // the form but recomputed by `normalize` on every change.
+    formReadOnlyKeys: ["code", "number"],
+    normalize: normalizeCodingDocument,
   }),
 ];
 

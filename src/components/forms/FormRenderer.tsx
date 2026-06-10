@@ -136,6 +136,31 @@ const inputClass =
 const inputErrorClass =
   "border-rose-400 focus:border-rose-500 focus:ring-rose-500/30";
 
+/**
+ * Non-editable computed value (field.readOnly): the user sees the value
+ * (e.g. an auto-assigned workplace code) but cannot type into it — it is
+ * recomputed by the descriptor's `normalize` pass.
+ */
+function ReadOnlyValue({
+  value,
+  compact = false,
+}: {
+  value: unknown;
+  compact?: boolean;
+}) {
+  const text = value == null || value === "" ? "—" : String(value);
+  return (
+    <p
+      className={`w-full rounded-md border border-slate-200 bg-slate-100 px-2.5 py-1.5 font-mono text-slate-600 ${
+        compact ? "text-xs" : "text-sm"
+      }`}
+      title="Назначается автоматически"
+    >
+      {text}
+    </p>
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /* Scalars                                                             */
 /* ------------------------------------------------------------------ */
@@ -149,6 +174,15 @@ function TextInput({
 }: NodeProps & { field: TextField }) {
   const id = pathKey(path);
   const err = fieldError(errors, path);
+  if (field.readOnly) {
+    return (
+      <div className="flex flex-col">
+        <FieldLabel text={labelOf(path, field.key)} required={false} />
+        <ReadOnlyValue value={value} />
+        <ErrorText message={err} />
+      </div>
+    );
+  }
   return (
     <div className="flex flex-col">
       <FieldLabel
@@ -185,6 +219,15 @@ function NumberInput({
       : typeof value === "string"
         ? value
         : "";
+  if (field.readOnly) {
+    return (
+      <div className="flex flex-col">
+        <FieldLabel text={labelOf(path, field.key)} required={false} />
+        <ReadOnlyValue value={display} />
+        <ErrorText message={err} />
+      </div>
+    );
+  }
   return (
     <div className="flex flex-col">
       <FieldLabel
@@ -593,7 +636,7 @@ function TableArray({
                   className="border-b border-slate-200 px-2 py-2 text-left font-semibold text-slate-600 whitespace-nowrap"
                 >
                   {label}
-                  {c.required && (
+                  {c.required && !c.readOnly && (
                     <span className="ml-0.5 text-rose-600">*</span>
                   )}
                 </th>
@@ -650,6 +693,18 @@ function TableArray({
 function CellRenderer({ field, path, value, errors, update }: NodeProps) {
   const err = fieldError(errors, path);
   const cls = `${inputClass} ${err ? inputErrorClass : ""} text-xs`;
+
+  if (
+    field.readOnly &&
+    (field.kind === "text" || field.kind === "number" || field.kind === "select")
+  ) {
+    return (
+      <>
+        <ReadOnlyValue value={value} compact />
+        <ErrorText message={err} />
+      </>
+    );
+  }
 
   if (field.kind === "text") {
     return (
