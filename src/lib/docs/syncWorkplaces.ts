@@ -243,7 +243,9 @@ export function syncProtocolFromCoding(
  *   never collides (different ids).
  *
  * Existing rows (Q2 = non-destructive): every stored measurement is kept,
- *   in order. Reducing a count or deleting a position never removes data;
+ *   regrouped into CODING ORDER — rows of one coding row stay together in
+ *   their stored relative order, rows not backed by coding go to the end of
+ *   the place. Reducing a count or deleting a position never removes data;
  *   such surplus rows are surfaced separately via getOrphanedMeasurements.
  *
  * New rows: created only where a coding row's count exceeds the number of
@@ -297,46 +299,54 @@ function syncMeasurementPlaces(
     const resolve = buildSectionResolver(section);
     const starts = sectionInstanceStarts(section);
 
-    // Carry every stored row forward (non-destructive). Rows that resolve to
-    // a coding row adopt its id and get a PER-INSTANCE display code: the
-    // k-th stored repetition of a coding row is the k-th physical workplace,
-    // so «Уборщик × 2» shows …016 and …017 — never two equal codes. Surplus
+    // Carry every stored row forward (non-destructive), bucketed by coding
+    // row. Rows adopt the id and a PER-INSTANCE display code: the k-th
+    // stored repetition of a coding row is the k-th physical workplace, so
+    // «Уборщик × 2» shows …016 and …017 — never two equal codes. Surplus
     // repetitions (k ≥ count) keep their stored code: the next instance
     // number already belongs to the following coding row.
-    const existingMeasurements: Record<string, unknown>[] = [];
-    const seenByCr = new Map<CodingRow, number>();
-    const firstByCr = new Map<CodingRow, Record<string, unknown>>();
+    const rowsByCr = new Map<CodingRow, Record<string, unknown>[]>();
+    const unresolvedRows: Record<string, unknown>[] = [];
     let sectionTemplate: Record<string, unknown> | undefined;
     if (ex) {
       for (const m of arr(ex.measurements)) {
         if (!isObj(m)) continue;
         const row = m as Record<string, unknown>;
         const cr = resolve(row);
-        let stamped = row;
-        if (cr) {
-          const k = seenByCr.get(cr) ?? 0;
-          seenByCr.set(cr, k + 1);
-          const code =
-            k < cr.count
-              ? formatWorkplaceCode(section.number, (starts.get(cr) ?? 1) + k)
-              : row.code;
-          stamped = { ...row, codingRowId: cr.id ?? "", code };
-          if (!firstByCr.has(cr)) firstByCr.set(cr, stamped);
+        if (!cr) {
+          unresolvedRows.push(row);
+          if (!sectionTemplate) sectionTemplate = row;
+          continue;
         }
-        existingMeasurements.push(stamped);
+        const bucket = rowsByCr.get(cr) ?? [];
+        const k = bucket.length;
+        const code =
+          k < cr.count
+            ? formatWorkplaceCode(section.number, (starts.get(cr) ?? 1) + k)
+            : row.code;
+        const stamped = { ...row, codingRowId: cr.id ?? "", code };
+        bucket.push(stamped);
+        rowsByCr.set(cr, bucket);
         if (!sectionTemplate) sectionTemplate = stamped;
       }
     }
 
+    // Rebuild the table in CODING ORDER: each coding row's stored
+    // measurements (relative order preserved) followed by rows created for
+    // the remaining count — so the code column reads 001, 002, 003… down
+    // the table and a new section always starts at 001. Rows not backed by
+    // coding keep their data and move to the end of the place.
+    //
     // rowNumber / pointNumber are assigned by the global renumbering pass
     // after the whole result is built, so the value passed here (0) is just a
     // placeholder and is never read.
-    const additional: Record<string, unknown>[] = [];
+    const merged: Record<string, unknown>[] = [];
     for (const cr of section.rows) {
-      const have = seenByCr.get(cr) ?? 0;
-      const sameWorkplace = firstByCr.get(cr);
+      const bucket = rowsByCr.get(cr) ?? [];
+      merged.push(...bucket);
+      const sameWorkplace = bucket[0];
       const start = starts.get(cr) ?? 1;
-      for (let i = have; i < cr.count; i++) {
+      for (let i = bucket.length; i < cr.count; i++) {
         // The i-th repetition is the i-th physical workplace of the coding
         // row — it gets its own code from the row's instance range.
         const code = formatWorkplaceCode(section.number, start + i);
@@ -355,14 +365,10 @@ function syncMeasurementPlaces(
         }
         // The id must always be stamped explicitly: templates are clones of
         // OTHER rows and would otherwise leak their own codingRowId.
-        additional.push({ ...built, codingRowId: cr.id ?? "" });
+        merged.push({ ...built, codingRowId: cr.id ?? "" });
       }
     }
-
-    const merged =
-      additional.length > 0
-        ? [...existingMeasurements, ...additional]
-        : existingMeasurements;
+    merged.push(...unresolvedRows);
 
     return { number: section.number, name: section.title, measurements: merged };
   });

@@ -175,6 +175,61 @@ describe("нумерация по рабочим местам (count > 1)", () =
     expect(getOrphanedMeasurements(resynced, sections)).toEqual([]);
   });
 
+  it("таблица измерений перестраивается в порядок кодировки: коды строго 001, 002, 003…", () => {
+    // Сценарий клиента: место посеяно из примера и начинается с
+    // электрослесарей, а Технолог из кодировки в таблице отсутствует.
+    const coding = normalizeCodingDocument(
+      codingDoc([
+        {
+          title: SECTION,
+          rows: [
+            { name: "Технолог" },
+            { name: "Электро слесарь", count: 2 },
+            { name: "Лаборант" },
+          ],
+        },
+      ]),
+    ) as AnyObj;
+    const sections = extractCodingSections(coding);
+
+    const meteo = {
+      places: [
+        {
+          number: 1,
+          name: SECTION,
+          measurements: [
+            { rowNumber: 1, pointNumber: "1т", place: "Электро слесарь", code: "", tempMeasured: "18,5" },
+            { rowNumber: 2, pointNumber: "2т", place: "Электро слесарь", code: "", tempMeasured: "19,7" },
+            { rowNumber: 3, pointNumber: "3т", place: "Лаборант", code: "", tempMeasured: "22,5" },
+          ],
+        },
+      ],
+    };
+
+    const synced = syncProtocolFromCoding("meteo", meteo, sections) as AnyObj;
+    const ms = synced.places[0].measurements;
+
+    // Порядок кодировки, коды по порядку с 001 — без дыр и хвостов.
+    expect(ms.map((m: AnyObj) => m.place)).toEqual([
+      "Технолог",
+      "Электро слесарь",
+      "Электро слесарь",
+      "Лаборант",
+    ]);
+    expect(ms.map((m: AnyObj) => m.code)).toEqual([
+      "01 001 001",
+      "01 001 002",
+      "01 001 003",
+      "01 001 004",
+    ]);
+    // Данные существующих строк поехали вместе со строками.
+    expect(ms[1].tempMeasured).toBe("18,5");
+    expect(ms[2].tempMeasured).toBe("19,7");
+    expect(ms[3].tempMeasured).toBe("22,5");
+    // Сквозная нумерация точек пересчитана.
+    expect(ms.map((m: AnyObj) => m.pointNumber)).toEqual(["1т", "2т", "3т", "4т"]);
+  });
+
   it("миграция перенумеровывает повторы измерений по экземплярам", () => {
     // Легаси: оба уборщика носят ОДИН код строки кодировки.
     const documents: Record<string, Json> = {
