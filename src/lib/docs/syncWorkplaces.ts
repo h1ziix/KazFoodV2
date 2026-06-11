@@ -1,11 +1,12 @@
 /**
  * Explicit workplace synchronisation from the Coding protocol.
  *
- * Class A (Lighting, EMP, Noise, Meteo) — additive, non-destructive:
- *   Places are added / reordered to match coding sections. Places present in
- *   the protocol but absent from coding (orphaned) are kept in-place and
- *   surfaced to the user via `getOrphanedPlaces` for manual removal.
- *   Measurements inside every place are always preserved.
+ * Class A (Lighting, EMP, Noise, Meteo) — places match coding sections and
+ *   measurement rows are pruned to coding: a row whose position was removed
+ *   from the section, or a repetition beyond the coding row's count, is
+ *   deleted on sync (clean result, no orphan warnings). A whole section
+ *   absent from coding is still kept in-place and surfaced via
+ *   `getOrphanedPlaces` (renaming a section must not silently wipe its data).
  *
  * Class B (Safety, SIZ) / Class C (Summary) / Class D (Heaviness, Tension) —
  *   full structural replacement: rows / workplaces absent from coding are
@@ -68,23 +69,6 @@ export interface SyncDiff {
 export interface OrphanedPlace {
   name: string;
   measurementCount: number;
-}
-
-/**
- * A single measurement row that is no longer backed by the coding: either its
- * position was removed from the section ("removed"), or its count was reduced
- * and this is a surplus repetition ("surplus"). Class A sync keeps such rows
- * (non-destructive); this surfaces them so the user can delete them manually.
- */
-export interface OrphanedMeasurement {
-  /** Place (section title) the row lives in. */
-  placeName: string;
-  /** rowNumber — unique within the place; used as the removal handle. */
-  rowNumber: number;
-  pointNumber: string;
-  /** The measurement's own position name. */
-  position: string;
-  reason: "removed" | "surplus";
 }
 
 // ─── Protocol classification ──────────────────────────────────────────────────
@@ -242,11 +226,11 @@ export function syncProtocolFromCoding(
  *   renamed in coding without losing data, and the same name in two sections
  *   never collides (different ids).
  *
- * Existing rows (Q2 = non-destructive): every stored measurement is kept,
- *   regrouped into CODING ORDER — rows of one coding row stay together in
- *   their stored relative order, rows not backed by coding go to the end of
- *   the place. Reducing a count or deleting a position never removes data;
- *   such surplus rows are surfaced separately via getOrphanedMeasurements.
+ * Existing rows (Q2 = destructive cleanup): stored measurements are regrouped
+ *   into CODING ORDER and pruned to coding — rows of one coding row stay
+ *   together in stored relative order up to its count; repetitions beyond the
+ *   count and rows whose position was removed from the section are dropped.
+ *   The sync result therefore always matches coding exactly, with no orphans.
  *
  * New rows: created only where a coding row's count exceeds the number of
  *   stored rows for that code. Norms are inherited strictly within the
@@ -298,41 +282,38 @@ function syncMeasurementPlaces(
     // then position name (both fallbacks serve rows that predate ids).
     const resolve = buildSectionResolver(section);
 
-    // Carry every stored row forward (non-destructive), bucketed by coding
-    // row. Rows adopt the id and the coding row's CURRENT code (codes are
-    // plain row indexes — «Количество» never affects them; repeated
-    // positions are separate coding rows with their own codes). Rows beyond
-    // the coding row's count keep their stored code and are surfaced as
-    // surplus via getOrphanedMeasurements.
+    // Carry stored rows forward, bucketed by coding row — DESTRUCTIVELY:
+    // coding is the single source of truth, so rows that no longer map to it
+    // are dropped on sync (no orphans, no warnings). Two cases are pruned:
+    //   • a position removed from the section → its row is dropped;
+    //   • a repetition beyond the coding row's count → dropped (codes are
+    //     plain row indexes; «Количество» 0|1 governs how many rows survive).
+    // Kept rows adopt the coding row's id and CURRENT code.
     const rowsByCr = new Map<CodingRow, Record<string, unknown>[]>();
-    const unresolvedRows: Record<string, unknown>[] = [];
     let sectionTemplate: Record<string, unknown> | undefined;
     if (ex) {
       for (const m of arr(ex.measurements)) {
         if (!isObj(m)) continue;
         const row = m as Record<string, unknown>;
+        // Any stored row can seed section-level conditions for new rows,
+        // even one that is about to be pruned (it still carries the right
+        // workCategory / measured baseline for the section).
+        if (!sectionTemplate) sectionTemplate = row;
         const cr = resolve(row);
-        if (!cr) {
-          unresolvedRows.push(row);
-          if (!sectionTemplate) sectionTemplate = row;
-          continue;
-        }
+        if (!cr) continue; // position removed from coding → drop
         const bucket = rowsByCr.get(cr) ?? [];
-        const code = bucket.length < cr.count ? cr.code : row.code;
-        const stamped = { ...row, codingRowId: cr.id ?? "", code };
-        bucket.push(stamped);
+        if (bucket.length >= cr.count) continue; // surplus repetition → drop
+        bucket.push({ ...row, codingRowId: cr.id ?? "", code: cr.code });
         rowsByCr.set(cr, bucket);
-        if (!sectionTemplate) sectionTemplate = stamped;
       }
     }
 
-    // Rebuild the table in CODING ORDER: each coding row's stored
+    // Rebuild the table in CODING ORDER: each coding row's surviving stored
     // measurements (relative order preserved) followed by rows created for
     // the remaining count — so the code column reads 001, 002, 003… down
-    // the table and a new section always starts at 001. Rows not backed by
-    // coding keep their data and move to the end of the place. A coding row
-    // with count = 0 is present in coding but not measured — no measurement
-    // row is created for it.
+    // the table and a new section always starts at 001. A coding row with
+    // count = 0 is present in coding but not measured — no measurement row
+    // is created for it. Pruned rows (removed positions / surplus) are gone.
     //
     // rowNumber / pointNumber are assigned by the global renumbering pass
     // after the whole result is built, so the value passed here (0) is just a
@@ -362,7 +343,6 @@ function syncMeasurementPlaces(
         merged.push({ ...built, codingRowId: cr.id ?? "" });
       }
     }
-    merged.push(...unresolvedRows);
 
     return { number: section.number, name: section.title, measurements: merged };
   });
@@ -946,96 +926,6 @@ export function removeOrphanedPlace(data: unknown, placeName: string): unknown {
   );
   if (filtered.length === places.length) return data;
   return { ...d, places: filtered };
-}
-
-/**
- * Row-level orphans inside places that DO still exist in the coding: a
- * position dropped from a section, or a repetition left over after its count
- * was reduced. (Whole-section orphans are reported by getOrphanedPlaces.)
- */
-export function getOrphanedMeasurements(
-  data: unknown,
-  sections: CodingSection[],
-): OrphanedMeasurement[] {
-  if (!isObj(data)) return [];
-  const existing = arr((data as Record<string, unknown>).places);
-
-  // Sections grouped by title for positional pairing with duplicate titles.
-  const sectionsByTitle = new Map<string, CodingSection[]>();
-  for (const s of sections) {
-    const bucket = sectionsByTitle.get(s.title) ?? [];
-    bucket.push(s);
-    sectionsByTitle.set(s.title, bucket);
-  }
-
-  const occurrence = new Map<string, number>();
-  const out: OrphanedMeasurement[] = [];
-
-  for (const p of existing) {
-    if (!isObj(p)) continue;
-    const place = p as Record<string, unknown>;
-    if (typeof place.name !== "string") continue;
-    const title = place.name;
-    const idx = occurrence.get(title) ?? 0;
-    occurrence.set(title, idx + 1);
-    const section = (sectionsByTitle.get(title) ?? [])[idx];
-    if (!section) continue; // whole-place orphan — reported elsewhere
-
-    // Same resolution order as the sync itself: id → code → name.
-    const resolve = buildSectionResolver(section);
-
-    const seenByCr = new Map<CodingRow, number>();
-    for (const m of arr(place.measurements)) {
-      if (!isObj(m)) continue;
-      const row = m as Record<string, unknown>;
-      const cr = resolve(row);
-
-      let reason: OrphanedMeasurement["reason"] | null = null;
-      if (!cr) {
-        reason = "removed";
-      } else {
-        const n = (seenByCr.get(cr) ?? 0) + 1;
-        seenByCr.set(cr, n);
-        if (n > cr.count) reason = "surplus";
-      }
-      if (!reason) continue;
-
-      out.push({
-        placeName: title,
-        rowNumber: typeof row.rowNumber === "number" ? row.rowNumber : 0,
-        pointNumber: typeof row.pointNumber === "string" ? row.pointNumber : "",
-        position: typeof row.place === "string" ? row.place : "",
-        reason,
-      });
-    }
-  }
-
-  return out;
-}
-
-export function removeOrphanedMeasurement(
-  data: unknown,
-  placeName: string,
-  rowNumber: number,
-): unknown {
-  if (!isObj(data)) return data;
-  const d = data as Record<string, unknown>;
-  let changed = false;
-
-  const newPlaces = arr(d.places).map((p) => {
-    if (!isObj(p)) return p;
-    const place = p as Record<string, unknown>;
-    if (place.name !== placeName) return p;
-    const filtered = arr(place.measurements).filter((m) => {
-      if (!isObj(m)) return true;
-      const drop = (m as Record<string, unknown>).rowNumber === rowNumber;
-      if (drop) changed = true;
-      return !drop;
-    });
-    return { ...place, measurements: filtered };
-  });
-
-  return changed ? { ...d, places: newPlaces } : data;
 }
 
 // ─── Private helpers ──────────────────────────────────────────────────────────

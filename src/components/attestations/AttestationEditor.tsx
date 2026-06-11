@@ -26,13 +26,10 @@ import {
   computeSyncDiff,
   getOrphanedPlaces,
   removeOrphanedPlace,
-  getOrphanedMeasurements,
-  removeOrphanedMeasurement,
   CLASS_A_KEYS,
   SYNCABLE_KEYS,
   type SyncDiff,
   type OrphanedPlace,
-  type OrphanedMeasurement,
 } from "@/lib/docs/syncWorkplaces";
 import type { CommonData } from "@/types/common";
 import type { Json } from "@/types/database";
@@ -170,15 +167,6 @@ export function AttestationEditor({
     return getOrphanedPlaces(storedValue, codingSections);
   }, [descriptor, storedValue, codingSections]);
 
-  // Row-level orphans: positions still inside a coding section but no longer
-  // required (deleted from coding, or surplus after a reduced count).  Sync
-  // keeps them (non-destructive); they are surfaced here for manual removal.
-  const orphanedMeasurements = useMemo<OrphanedMeasurement[]>(() => {
-    if (!descriptor || !CLASS_A_KEYS.has(descriptor.key)) return [];
-    if (codingSections.length === 0) return [];
-    return getOrphanedMeasurements(storedValue, codingSections);
-  }, [descriptor, storedValue, codingSections]);
-
   // Seed missing slots once per tab switch.  We use a ref to skip the
   // effect if the slot is already populated, avoiding any chance of
   // overwriting user edits on re-render.
@@ -299,14 +287,6 @@ export function AttestationEditor({
   function handleDeleteOrphanedPlace(placeName: string) {
     if (!descriptor) return;
     const result = removeOrphanedPlace(storedValue, placeName);
-    if (result === storedValue) return;
-    onChange({ ...documents, [descriptor.key]: result as Json });
-    setTouched(true);
-  }
-
-  function handleDeleteOrphanedMeasurement(placeName: string, rowNumber: number) {
-    if (!descriptor) return;
-    const result = removeOrphanedMeasurement(storedValue, placeName, rowNumber);
     if (result === storedValue) return;
     onChange({ ...documents, [descriptor.key]: result as Json });
     setTouched(true);
@@ -453,46 +433,6 @@ export function AttestationEditor({
                 <button
                   type="button"
                   onClick={() => handleDeleteOrphanedPlace(p.name)}
-                  className="shrink-0 rounded-md border border-rose-200 bg-white px-2.5 py-1 text-xs font-medium text-rose-700 hover:bg-rose-50"
-                >
-                  Удалить
-                </button>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {orphanedMeasurements.length > 0 && (
-        <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
-          <p className="mb-2 text-xs font-semibold text-amber-800">
-            Строки не соответствуют кодировке:
-          </p>
-          <ul className="flex flex-col gap-1.5">
-            {orphanedMeasurements.map((m) => (
-              <li
-                key={`${m.placeName}#${m.rowNumber}`}
-                className="flex items-center justify-between gap-3 rounded-md border border-amber-200 bg-white px-3 py-2"
-              >
-                <div className="flex min-w-0 items-center gap-2">
-                  <span className="text-amber-500" aria-hidden="true">
-                    ⚠
-                  </span>
-                  <span className="truncate text-sm font-medium text-slate-800">
-                    {m.position || "—"}
-                  </span>
-                  <span className="shrink-0 text-xs text-slate-500">
-                    {m.placeName} · {m.pointNumber} ·{" "}
-                    {m.reason === "removed"
-                      ? "удалена из кодировки"
-                      : "лишний повтор"}
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() =>
-                    handleDeleteOrphanedMeasurement(m.placeName, m.rowNumber)
-                  }
                   className="shrink-0 rounded-md border border-rose-200 bg-white px-2.5 py-1 text-xs font-medium text-rose-700 hover:bg-rose-50"
                 >
                   Удалить

@@ -18,7 +18,6 @@ import {
 import {
   computeSyncDiff,
   extractCodingSections,
-  getOrphanedMeasurements,
   syncProtocolFromCoding,
 } from "@/lib/docs/syncWorkplaces";
 import type { Json } from "@/types/database";
@@ -175,12 +174,11 @@ describe("код — индекс строки; количество на код
       "01 001 003",
     ]);
 
-    // Повторный синк: коды стабильны, ложных орфанов нет.
+    // Повторный синк: коды стабильны, лишних строк не появляется.
     const resynced = syncProtocolFromCoding("meteo", meteo, sections) as AnyObj;
     expect(resynced.places[0].measurements.map((m: AnyObj) => m.code)).toEqual(
       ms.map((m: AnyObj) => m.code),
     );
-    expect(getOrphanedMeasurements(resynced, sections)).toEqual([]);
   });
 
   it("количество 0: строка есть в кодировке, но в протокол измерений не попадает", () => {
@@ -471,7 +469,7 @@ describe("Class A (измерения)", () => {
     expect(ms.map((m: AnyObj) => m.pointNumber)).toEqual(["1т", "2т"]);
   });
 
-  it("орфаны: строка удалённой должности помечается removed, соседка с унаследованным кодом — нет", () => {
+  it("чистый синк: строка удалённой должности УДАЛЯЕТСЯ автоматически, соседка сохраняется", () => {
     const coding = normalizeCodingDocument(
       codingDoc([
         { title: SECTION, rows: [{ name: "Должность А" }, { name: "Должность Б" }] },
@@ -479,26 +477,55 @@ describe("Class A (измерения)", () => {
     ) as AnyObj;
     const sections = extractCodingSections(coding);
 
-    const lighting = syncProtocolFromCoding(
-      "lighting",
-      lightingDoc([]),
-      sections,
-    ) as AnyObj;
+    // Первый синк создаёт по строке на А и Б; помечаем строку «Б».
+    let lighting = syncProtocolFromCoding("lighting", lightingDoc([]), sections) as AnyObj;
+    lighting = {
+      ...lighting,
+      places: lighting.places.map((p: AnyObj) => ({
+        ...p,
+        measurements: p.measurements.map((m: AnyObj) =>
+          m.place === "Должность Б" ? { ...m, measured: 777 } : m,
+        ),
+      })),
+    };
 
-    // Удаляем «А» из кодировки → «Б» наследует код 01 001 001.
+    // Удаляем «А» из кодировки → остаётся только «Б» (наследует код 001).
     const codingAfter = normalizeCodingDocument({
       ...coding,
       sections: [{ ...coding.sections[0], rows: [coding.sections[0].rows[1]] }],
     }) as AnyObj;
     const sectionsAfter = extractCodingSections(codingAfter);
-    expect(sectionsAfter[0].rows[0].code).toBe("01 001 001");
 
-    const orphans = getOrphanedMeasurements(lighting, sectionsAfter);
-    // Ровно один орфан — измерение «А»; «Б» (id-совпадение) не задета,
-    // хотя её сохранённый код (01 001 002) уже не существует в кодировке.
-    expect(orphans).toHaveLength(1);
-    expect(orphans[0].position).toBe("Должность А");
-    expect(orphans[0].reason).toBe("removed");
+    const synced = syncProtocolFromCoding("lighting", lighting, sectionsAfter) as AnyObj;
+    const ms = synced.places[0].measurements;
+    // Строка «А» удалена автоматически — без предупреждений и ручных действий.
+    expect(ms).toHaveLength(1);
+    expect(ms[0].place).toBe("Должность Б");
+    expect(ms[0].code).toBe("01 001 001");
+    expect(ms[0].measured).toBe(777); // данные «Б» сохранены
+    expect(ms[0].codingRowId).toBe(sectionsAfter[0].rows[0].id);
+  });
+
+  it("чистый синк: лишние повторы (сверх count) удаляются автоматически", () => {
+    const coding = normalizeCodingDocument(
+      codingDoc([{ title: SECTION, rows: [{ name: "Должность А" }] }]),
+    ) as AnyObj;
+    const sections = extractCodingSections(coding);
+    const id = coding.sections[0].rows[0].id;
+
+    // Легаси-место с тремя строками, привязанными к ОДНОЙ строке кодировки.
+    const lighting = lightingDoc([
+      measurement("Должность А", { codingRowId: id, code: "01 001 001", measured: 100 }),
+      measurement("Должность А", { codingRowId: id, code: "01 001 001", measured: 200 }),
+      measurement("Должность А", { codingRowId: id, code: "01 001 001", measured: 300 }),
+    ]);
+
+    const synced = syncProtocolFromCoding("lighting", lighting, sections) as AnyObj;
+    const ms = synced.places[0].measurements;
+    // Остаётся ровно одна строка (count = 1), первая по порядку.
+    expect(ms).toHaveLength(1);
+    expect(ms[0].measured).toBe(100);
+    expect(ms[0].code).toBe("01 001 001");
   });
 });
 
