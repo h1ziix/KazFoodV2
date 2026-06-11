@@ -28,6 +28,7 @@
  */
 
 import type { CodingRow, CodingSection } from "@/types/coding";
+import { formatWorkplaceCode } from "@/lib/docs/workplaceCodes";
 import {
   computeSummaryValuesDiff,
   mergeSummaryValues,
@@ -294,58 +295,63 @@ function syncMeasurementPlaces(
     // Resolution maps for this section: stable id first, then display code,
     // then position name (both fallbacks serve rows that predate ids).
     const resolve = buildSectionResolver(section);
+    const starts = sectionInstanceStarts(section);
 
     // Carry every stored row forward (non-destructive). Rows that resolve to
-    // a coding row adopt its id and get their display code refreshed (codes
-    // are positional and may have been renumbered since the last sync).
+    // a coding row adopt its id and get a PER-INSTANCE display code: the
+    // k-th stored repetition of a coding row is the k-th physical workplace,
+    // so «Уборщик × 2» shows …016 and …017 — never two equal codes. Surplus
+    // repetitions (k ≥ count) keep their stored code: the next instance
+    // number already belongs to the following coding row.
     const existingMeasurements: Record<string, unknown>[] = [];
-    const resolvedCr: (CodingRow | undefined)[] = [];
+    const seenByCr = new Map<CodingRow, number>();
+    const firstByCr = new Map<CodingRow, Record<string, unknown>>();
+    let sectionTemplate: Record<string, unknown> | undefined;
     if (ex) {
       for (const m of arr(ex.measurements)) {
         if (!isObj(m)) continue;
         const row = m as Record<string, unknown>;
         const cr = resolve(row);
-        resolvedCr.push(cr);
-        existingMeasurements.push(
-          cr ? { ...row, codingRowId: cr.id ?? "", code: cr.code } : row,
-        );
+        let stamped = row;
+        if (cr) {
+          const k = seenByCr.get(cr) ?? 0;
+          seenByCr.set(cr, k + 1);
+          const code =
+            k < cr.count
+              ? formatWorkplaceCode(section.number, (starts.get(cr) ?? 1) + k)
+              : row.code;
+          stamped = { ...row, codingRowId: cr.id ?? "", code };
+          if (!firstByCr.has(cr)) firstByCr.set(cr, stamped);
+        }
+        existingMeasurements.push(stamped);
+        if (!sectionTemplate) sectionTemplate = stamped;
       }
     }
-
-    // Per-coding-row tally + first row as same-workplace template; first row
-    // of the section as the fallback (section-level) template.
-    const haveByCr = new Map<CodingRow, number>();
-    const firstByCr = new Map<CodingRow, Record<string, unknown>>();
-    let sectionTemplate: Record<string, unknown> | undefined;
-    existingMeasurements.forEach((row, i) => {
-      const cr = resolvedCr[i];
-      if (cr) {
-        haveByCr.set(cr, (haveByCr.get(cr) ?? 0) + 1);
-        if (!firstByCr.has(cr)) firstByCr.set(cr, row);
-      }
-      if (!sectionTemplate) sectionTemplate = row;
-    });
 
     // rowNumber / pointNumber are assigned by the global renumbering pass
     // after the whole result is built, so the value passed here (0) is just a
     // placeholder and is never read.
     const additional: Record<string, unknown>[] = [];
     for (const cr of section.rows) {
-      const have = haveByCr.get(cr) ?? 0;
+      const have = seenByCr.get(cr) ?? 0;
       const sameWorkplace = firstByCr.get(cr);
+      const start = starts.get(cr) ?? 1;
       for (let i = have; i < cr.count; i++) {
+        // The i-th repetition is the i-th physical workplace of the coding
+        // row — it gets its own code from the row's instance range.
+        const code = formatWorkplaceCode(section.number, start + i);
         let built: Record<string, unknown>;
         if (sameWorkplace) {
           // Repetition of an existing workplace → full clone incl. measured.
-          built = buildRow(key, sameWorkplace, 0, cr.code, cr.name, true);
+          built = buildRow(key, sameWorkplace, 0, code, cr.name, true);
         } else if (sectionTemplate) {
           // Position new to a populated section → inherit the first row of
           // THIS section, including its measured reading (positions in one
           // section share the same category/conditions, e.g. all АУП = А-1).
-          built = buildRow(key, sectionTemplate, 0, cr.code, cr.name, true);
+          built = buildRow(key, sectionTemplate, 0, code, cr.name, true);
         } else {
           // Empty section → blank default, nothing to inherit from.
-          built = buildRow(key, undefined, 0, cr.code, cr.name, false);
+          built = buildRow(key, undefined, 0, code, cr.name, false);
         }
         // The id must always be stamped explicitly: templates are clones of
         // OTHER rows and would otherwise leak their own codingRowId.
@@ -1129,25 +1135,50 @@ function claimByIdentity(
 }
 
 /**
+ * 1-based first workplace-instance number per coding row of a section: a
+ * row with count = N occupies N consecutive numbers, so the next row starts
+ * after them (mirrors normalizeCodingDocument / workplaceCodes.ts).
+ */
+function sectionInstanceStarts(section: CodingSection): Map<CodingRow, number> {
+  const starts = new Map<CodingRow, number>();
+  let instance = 1;
+  for (const cr of section.rows) {
+    starts.set(cr, instance);
+    instance += Math.max(1, Math.floor(cr.count));
+  }
+  return starts;
+}
+
+/**
  * Per-section resolver for Class A measurement rows: stable id first, then
  * code+name, then position name alone (the fallbacks serve rows without a
  * live id link). The code fallback is name-guarded for the same reason as in
  * claimByIdentity: positional codes migrate to neighbouring rows after a
  * deletion, so a bare code match would attribute an orphaned measurement to
- * whichever position inherited its code. Returns the coding row a
- * measurement belongs to, if any.
+ * whichever position inherited its code. Every code of a row's instance
+ * range is recognised (a count-2 row owns two codes). Returns the coding
+ * row a measurement belongs to, if any.
  */
 function buildSectionResolver(
   section: CodingSection,
 ): (row: Record<string, unknown>) => CodingRow | undefined {
+  const starts = sectionInstanceStarts(section);
   const byId = new Map<string, CodingRow>();
   const byCodeAndName = new Map<string, CodingRow>();
   const byName = new Map<string, CodingRow>();
   for (const cr of section.rows) {
     if (cr.id !== undefined && !byId.has(cr.id)) byId.set(cr.id, cr);
     const nk = normalizePlaceName(cr.name);
-    const ck = `${cr.code}|${nk}`;
-    if (!byCodeAndName.has(ck)) byCodeAndName.set(ck, cr);
+    // Stored row code (legacy base code) + every instance code of the range.
+    const codes = new Set<string>([cr.code]);
+    const start = starts.get(cr) ?? 1;
+    for (let k = 0; k < Math.max(1, Math.floor(cr.count)); k++) {
+      codes.add(formatWorkplaceCode(section.number, start + k));
+    }
+    for (const code of codes) {
+      const ck = `${code}|${nk}`;
+      if (!byCodeAndName.has(ck)) byCodeAndName.set(ck, cr);
+    }
     if (!byName.has(nk)) byName.set(nk, cr);
   }
   return (row) => {

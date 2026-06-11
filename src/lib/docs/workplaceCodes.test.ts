@@ -137,6 +137,78 @@ describe("normalizeCodingDocument", () => {
   });
 });
 
+describe("нумерация по рабочим местам (count > 1)", () => {
+  it("строка с count = 2 занимает два номера; следующая строка смещается", () => {
+    const n = normalizeCodingDocument(
+      codingDoc([
+        {
+          title: SECTION,
+          rows: [{ name: "А" }, { name: "Уборщик", count: 2 }, { name: "В" }],
+        },
+      ]),
+    ) as AnyObj;
+
+    expect(n.sections[0].rows.map((r: AnyObj) => r.code)).toEqual([
+      "01 001 001",
+      "01 001 002", // Уборщик ×2 занимает 002–003
+      "01 001 004",
+    ]);
+  });
+
+  it("микроклимат: у двух одинаковых должностей разные коды (кейс клиента)", () => {
+    const coding = normalizeCodingDocument(
+      codingDoc([
+        { title: SECTION, rows: [{ name: "А" }, { name: "Уборщик", count: 2 }] },
+      ]),
+    ) as AnyObj;
+    const sections = extractCodingSections(coding);
+
+    const meteo = syncProtocolFromCoding("meteo", { places: [] }, sections) as AnyObj;
+    const codes = meteo.places[0].measurements.map((m: AnyObj) => m.code);
+    expect(codes).toEqual(["01 001 001", "01 001 002", "01 001 003"]);
+
+    // Повторный синк: коды стабильны, ложных орфанов нет.
+    const resynced = syncProtocolFromCoding("meteo", meteo, sections) as AnyObj;
+    expect(resynced.places[0].measurements.map((m: AnyObj) => m.code)).toEqual(
+      codes,
+    );
+    expect(getOrphanedMeasurements(resynced, sections)).toEqual([]);
+  });
+
+  it("миграция перенумеровывает повторы измерений по экземплярам", () => {
+    // Легаси: оба уборщика носят ОДИН код строки кодировки.
+    const documents: Record<string, Json> = {
+      coding: codingDoc([
+        { title: SECTION, rows: [{ name: "Уборщик", count: 2, code: "01 001 016" }] },
+      ]) as Json,
+      meteo: {
+        places: [
+          {
+            number: 1,
+            name: SECTION,
+            measurements: [
+              { rowNumber: 1, pointNumber: "1т", place: "Уборщик", code: "01 001 016", tempMeasured: "21" },
+              { rowNumber: 2, pointNumber: "2т", place: "Уборщик", code: "01 001 016", tempMeasured: "22" },
+            ],
+          },
+        ],
+      } as Json,
+    };
+
+    const migrated = migrateWorkplaceCodes(documents);
+    const coding = migrated["coding"] as AnyObj;
+    const meteo = migrated["meteo"] as AnyObj;
+
+    expect(coding.sections[0].rows[0].code).toBe("01 001 001");
+    const ms = meteo.places[0].measurements;
+    expect(ms.map((m: AnyObj) => m.code)).toEqual(["01 001 001", "01 001 002"]);
+    // Оба повтора привязаны к одной строке кодировки, значения не тронуты.
+    expect(ms[0].codingRowId).toBe(coding.sections[0].rows[0].id);
+    expect(ms[1].codingRowId).toBe(coding.sections[0].rows[0].id);
+    expect(ms.map((m: AnyObj) => m.tempMeasured)).toEqual(["21", "22"]);
+  });
+});
+
 describe("синхронизация: данные не переезжают на соседние должности (req 5)", () => {
   it("heaviness: после удаления строки кодировки карточка остаётся у своей должности", () => {
     const coding = normalizeCodingDocument(
