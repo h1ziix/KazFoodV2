@@ -121,9 +121,10 @@ export function normalizeCodingDocument(data: unknown): unknown {
  * Where coding-linked rows live inside each dependent document. Used to walk
  * the persisted bundle when codes are renumbered. One row per coding row —
  * these documents display the row's base code (first instance of the range).
+ * Травмобезопасность ходит отдельным walker'ом (remapSafetyRows): её коды —
+ * построчные порядковые номера раздела, а не базовые коды диапазонов.
  */
 const DEPENDENT_SHAPES: Record<string, readonly [string, string]> = {
-  safety: ["sections", "rows"],
   siz: ["sections", "rows"],
   summary: ["places", "workplaces"],
 };
@@ -247,6 +248,13 @@ export function migrateWorkplaceCodes(
       bundleChanged = true;
     }
   }
+  {
+    const remapped = remapSafetyRows(documents["safety"], maps);
+    if (remapped !== documents["safety"]) {
+      next["safety"] = remapped as Json;
+      bundleChanged = true;
+    }
+  }
 
   return bundleChanged ? next : documents;
 }
@@ -273,6 +281,42 @@ function remapNested(
     return { ...group, [innerKey]: inner };
   });
   return changed ? { ...doc, [outerKey]: outer } : doc;
+}
+
+/**
+ * Травмобезопасность: код в таблице — построчный порядковый номер раздела
+ * (в легаси-документе клиента он собирался полем Word `SEQ`, т.е. был
+ * автонумератором строк), а НЕ базовый код диапазона кодировки. Миграция
+ * перешивает codingRowId как обычно, а код проставляет позиционно — колонка
+ * читается 001, 002, 003… без дыр уже при загрузке, до всякого синка.
+ * Порядок строк не меняется, данные не трогаются.
+ */
+function remapSafetyRows(doc: unknown, maps: CodeMaps): unknown {
+  if (!isObj(doc) || !Array.isArray(doc.sections)) return doc;
+  let changed = false;
+  const sections = doc.sections.map((sec, si) => {
+    if (!isObj(sec) || !Array.isArray(sec.rows)) return sec;
+    const sectionNo =
+      typeof sec.number === "number" && sec.number >= 1 ? sec.number : si + 1;
+    let secChanged = false;
+    const rows = sec.rows.map((row, ri) => {
+      if (!isObj(row)) return row;
+      const code = formatWorkplaceCode(sectionNo, ri + 1);
+      const target = resolveTarget(row, maps);
+      if (target) {
+        if (row.code === code && row.codingRowId === target.id) return row;
+        secChanged = true;
+        return { ...row, codingRowId: target.id, code };
+      }
+      if (row.code === code) return row;
+      secChanged = true;
+      return { ...row, code };
+    });
+    if (!secChanged) return sec;
+    changed = true;
+    return { ...sec, rows };
+  });
+  return changed ? { ...doc, sections } : doc;
 }
 
 /** Remap rows in a flat top-level list (heaviness/tension workplaces). */

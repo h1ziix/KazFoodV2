@@ -610,6 +610,15 @@ const SAFETY_NEW_ROW_DEFAULTS = {
   finalNote: "соответствует стандартам",
 } as const;
 
+/**
+ * Травмобезопасность — ИСКЛЮЧЕНИЕ из модели кодов-диапазонов: код в этой
+ * таблице — построчный порядковый номер раздела ("01" + раздел + № строки),
+ * БЕЗ резервирования номеров под count. В легаси-документе клиента
+ * («12. Травма…») код собирался полем Word `SEQ` — сквозным автонумератором
+ * строк, поэтому колонка обязана читаться 001, 002, 003… без дыр, даже когда
+ * у должности count > 1 (повторы здесь свёрнуты в одну строку с количеством).
+ * Идентичность строк по-прежнему codingRowId; позиционный код — display-only.
+ */
 function syncSafetyRows(data: unknown, sections: CodingSection[]): unknown {
   if (!isObj(data)) return data;
   const d = data as Record<string, unknown>;
@@ -618,12 +627,15 @@ function syncSafetyRows(data: unknown, sections: CodingSection[]): unknown {
   const newSections = sections.map((section) => ({
     number: section.number,
     title: `${section.number}. ${section.title}`,
-    rows: section.rows.map((cr) => {
+    rows: section.rows.map((cr, i) => {
+      // Построчный код перекрывает базовый код кодировки из linkFields.
+      const code = formatWorkplaceCode(section.number, i + 1);
       const ex = byRow.get(cr);
       return ex
-        ? { ...ex, ...linkFields(cr), position: cr.name, count: cr.count }
+        ? { ...ex, ...linkFields(cr), code, position: cr.name, count: cr.count }
         : {
             ...linkFields(cr),
+            code,
             position: cr.name,
             count: cr.count,
             ...SAFETY_NEW_ROW_DEFAULTS,

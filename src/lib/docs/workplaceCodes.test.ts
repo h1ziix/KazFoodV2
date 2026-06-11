@@ -441,6 +441,86 @@ describe("Class A (измерения)", () => {
   });
 });
 
+describe("травмобезопасность: построчные коды без дыр", () => {
+  it("синк: код = номер строки раздела, count не резервирует номера", () => {
+    const coding = normalizeCodingDocument(
+      codingDoc([
+        {
+          title: SECTION,
+          rows: [{ name: "А" }, { name: "Уборщик", count: 2 }, { name: "В" }],
+        },
+      ]),
+    ) as AnyObj;
+    const sections = extractCodingSections(coding);
+    // В кодировке коды-диапазоны: А=001, Уборщик=002(–003), В=004.
+    expect(sections[0].rows.map((r) => r.code)).toEqual([
+      "01 001 001",
+      "01 001 002",
+      "01 001 004",
+    ]);
+
+    const safety = syncProtocolFromCoding("safety", { sections: [] }, sections) as AnyObj;
+    const rows = safety.sections[0].rows;
+    // А в травме — построчно, без дыр: 001, 002, 003.
+    expect(rows.map((r: AnyObj) => r.code)).toEqual([
+      "01 001 001",
+      "01 001 002",
+      "01 001 003",
+    ]);
+    expect(rows.map((r: AnyObj) => r.count)).toEqual([1, 2, 1]);
+
+    // Повторный синк: коды стабильны, данные строк сохраняются по id.
+    rows[1].equipment = "ИНВЕНТАРЬ УБОРЩИКА";
+    const resynced = syncProtocolFromCoding("safety", safety, sections) as AnyObj;
+    expect(resynced.sections[0].rows.map((r: AnyObj) => r.code)).toEqual([
+      "01 001 001",
+      "01 001 002",
+      "01 001 003",
+    ]);
+    expect(resynced.sections[0].rows[1].equipment).toBe("ИНВЕНТАРЬ УБОРЩИКА");
+  });
+
+  it("миграция выпрямляет сохранённые коды с дырами при загрузке", () => {
+    const coding = normalizeCodingDocument(
+      codingDoc([
+        {
+          title: SECTION,
+          rows: [{ name: "А" }, { name: "Уборщик", count: 2 }, { name: "В" }],
+        },
+      ]),
+    ) as AnyObj;
+    const ids = coding.sections[0].rows.map((r: AnyObj) => r.id);
+
+    // Сохранённое состояние из бага: коды-диапазоны с дырой (002 → 004).
+    const documents: Record<string, Json> = {
+      coding: coding as Json,
+      safety: {
+        sections: [
+          {
+            number: 1,
+            title: `1. ${SECTION}`,
+            rows: [
+              { codingRowId: ids[0], code: "01 001 001", position: "А", count: 1, equipment: "", documentation: "в наличии", result: "соответствует", nonComplianceReasons: "отсутствуют", finalNote: "ок" },
+              { codingRowId: ids[1], code: "01 001 002", position: "Уборщик", count: 2, equipment: "ШВАБРА", documentation: "в наличии", result: "соответствует", nonComplianceReasons: "отсутствуют", finalNote: "ок" },
+              { codingRowId: ids[2], code: "01 001 004", position: "В", count: 1, equipment: "", documentation: "в наличии", result: "соответствует", nonComplianceReasons: "отсутствуют", finalNote: "ок" },
+            ],
+          },
+        ],
+      } as Json,
+    };
+
+    const migrated = migrateWorkplaceCodes(documents);
+    const rows = (migrated["safety"] as AnyObj).sections[0].rows;
+    expect(rows.map((r: AnyObj) => r.code)).toEqual([
+      "01 001 001",
+      "01 001 002",
+      "01 001 003",
+    ]);
+    expect(rows[1].equipment).toBe("ШВАБРА");
+    expect(rows[1].codingRowId).toBe(ids[1]);
+  });
+});
+
 describe("migrateWorkplaceCodes (бандл-миграция)", () => {
   it("перенумеровывает кодировку и перешивает зависимые протоколы за один проход", () => {
     // Легаси-кодировка в стиле реальных данных: сквозной третий блок,
@@ -505,9 +585,11 @@ describe("migrateWorkplaceCodes (бандл-миграция)", () => {
     expect(coding.sections[1].rows[0].code).toBe("01 002 001");
     expect(coding.sections[1].rows[0].id).toMatch(/\S/);
 
-    // Зависимые строки перешиты по старому коду: новый код + codingRowId.
+    // Зависимые строки перешиты по старому коду (codingRowId), а код в
+    // травме — ПОСТРОЧНЫЙ номер её собственной таблицы: Бухгалтер —
+    // единственная строка своей секции → 001 (не базовый код кодировки 002).
     const buh = safety.sections[0].rows[0];
-    expect(buh.code).toBe("01 001 002");
+    expect(buh.code).toBe("01 001 001");
     expect(buh.codingRowId).toBe(coding.sections[0].rows[1].id);
     expect(buh.equipment).toBe("ПК БУХГАЛТЕРА");
 
