@@ -3,7 +3,11 @@ import type PizZip from "pizzip";
 import { renderDocument } from "./engine";
 import { restartListNumberingPerLoop } from "./numberingRestart";
 import { injectCommonData } from "./commonDataInjector";
-import { normalizeCodingDocument } from "./workplaceCodes";
+import {
+  migrateWorkplaceCodes,
+  normalizeCodingDocument,
+} from "./workplaceCodes";
+import type { Json } from "@/types/database";
 import type { CommonData } from "@/types/common";
 
 // Schemas (single-source-of-truth: per-document zod files)
@@ -138,6 +142,19 @@ export interface DocumentDescriptor<TInput> {
    * automatic renumbering and the user never types codes by hand.
    */
   normalize?: (data: unknown) => unknown;
+  /**
+   * Optional bundle-wide propagation applied AFTER this document's slot is
+   * written: receives the whole documents bundle and may update other
+   * slots.  Must be pure, idempotent and identity-preserving.
+   *
+   * Used by Coding as the single source of truth for workplace codes: every
+   * coding edit re-stitches and refreshes the codes of linked rows in all
+   * dependent protocols (migrateWorkplaceCodes).  Codes only — structural
+   * add / delete of dependent rows stays behind the explicit sync button.
+   */
+  propagate?: (
+    documents: Record<string, Json>,
+  ) => Record<string, Json>;
 }
 
 /**
@@ -337,6 +354,9 @@ export const DOCUMENT_REGISTRY: DocumentDescriptor<unknown>[] = [
     // the form but recomputed by `normalize` on every change.
     formReadOnlyKeys: ["code", "number"],
     normalize: normalizeCodingDocument,
+    // Coding is the single source of truth for workplace codes: every edit
+    // immediately refreshes the codes of linked rows in all protocols.
+    propagate: migrateWorkplaceCodes,
   }),
 ];
 

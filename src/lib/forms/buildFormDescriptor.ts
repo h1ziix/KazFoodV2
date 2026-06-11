@@ -309,6 +309,7 @@ function buildNumber(
   const checks = (d.checks as Array<{ kind: string; value?: number }>) ?? [];
   const integer = checks.some((c) => c.kind === "int");
   const minCheck = checks.find((c) => c.kind === "min");
+  const maxCheck = checks.find((c) => c.kind === "max");
   return {
     kind: "number",
     key,
@@ -316,6 +317,7 @@ function buildNumber(
     required,
     integer,
     min: minCheck?.value,
+    max: maxCheck?.value,
     allowEmptyString: allowEmpty,
     defaultValue,
   };

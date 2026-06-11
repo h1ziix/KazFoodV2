@@ -23,7 +23,8 @@ const workplaceSchema = z.object({
   codingRowId: z.string().optional(),
   code: nonEmpty,
   profession: nonEmpty,
-  count: z.number().int().positive(),
+  // Количество приходит из кодировки, где допустимы 0 и 1.
+  count: z.number().int().min(0),
   factors: z
     .array(factorSchema)
     .min(1, "должен быть хотя бы один фактор"),

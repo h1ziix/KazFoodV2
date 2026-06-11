@@ -297,14 +297,13 @@ function syncMeasurementPlaces(
     // Resolution maps for this section: stable id first, then display code,
     // then position name (both fallbacks serve rows that predate ids).
     const resolve = buildSectionResolver(section);
-    const starts = sectionInstanceStarts(section);
 
     // Carry every stored row forward (non-destructive), bucketed by coding
-    // row. Rows adopt the id and a PER-INSTANCE display code: the k-th
-    // stored repetition of a coding row is the k-th physical workplace, so
-    // «Уборщик × 2» shows …016 and …017 — never two equal codes. Surplus
-    // repetitions (k ≥ count) keep their stored code: the next instance
-    // number already belongs to the following coding row.
+    // row. Rows adopt the id and the coding row's CURRENT code (codes are
+    // plain row indexes — «Количество» never affects them; repeated
+    // positions are separate coding rows with their own codes). Rows beyond
+    // the coding row's count keep their stored code and are surfaced as
+    // surplus via getOrphanedMeasurements.
     const rowsByCr = new Map<CodingRow, Record<string, unknown>[]>();
     const unresolvedRows: Record<string, unknown>[] = [];
     let sectionTemplate: Record<string, unknown> | undefined;
@@ -319,11 +318,7 @@ function syncMeasurementPlaces(
           continue;
         }
         const bucket = rowsByCr.get(cr) ?? [];
-        const k = bucket.length;
-        const code =
-          k < cr.count
-            ? formatWorkplaceCode(section.number, (starts.get(cr) ?? 1) + k)
-            : row.code;
+        const code = bucket.length < cr.count ? cr.code : row.code;
         const stamped = { ...row, codingRowId: cr.id ?? "", code };
         bucket.push(stamped);
         rowsByCr.set(cr, bucket);
@@ -335,7 +330,9 @@ function syncMeasurementPlaces(
     // measurements (relative order preserved) followed by rows created for
     // the remaining count — so the code column reads 001, 002, 003… down
     // the table and a new section always starts at 001. Rows not backed by
-    // coding keep their data and move to the end of the place.
+    // coding keep their data and move to the end of the place. A coding row
+    // with count = 0 is present in coding but not measured — no measurement
+    // row is created for it.
     //
     // rowNumber / pointNumber are assigned by the global renumbering pass
     // after the whole result is built, so the value passed here (0) is just a
@@ -345,11 +342,8 @@ function syncMeasurementPlaces(
       const bucket = rowsByCr.get(cr) ?? [];
       merged.push(...bucket);
       const sameWorkplace = bucket[0];
-      const start = starts.get(cr) ?? 1;
       for (let i = bucket.length; i < cr.count; i++) {
-        // The i-th repetition is the i-th physical workplace of the coding
-        // row — it gets its own code from the row's instance range.
-        const code = formatWorkplaceCode(section.number, start + i);
+        const code = cr.code;
         let built: Record<string, unknown>;
         if (sameWorkplace) {
           // Repetition of an existing workplace → full clone incl. measured.
@@ -1153,52 +1147,33 @@ function claimByIdentity(
 }
 
 /**
- * 1-based first workplace-instance number per coding row of a section: a
- * row with count = N occupies N consecutive numbers, so the next row starts
- * after them (mirrors normalizeCodingDocument / workplaceCodes.ts).
- */
-function sectionInstanceStarts(section: CodingSection): Map<CodingRow, number> {
-  const starts = new Map<CodingRow, number>();
-  let instance = 1;
-  for (const cr of section.rows) {
-    starts.set(cr, instance);
-    instance += Math.max(1, Math.floor(cr.count));
-  }
-  return starts;
-}
-
-/**
  * Per-section resolver for Class A measurement rows: stable id first, then
  * code+name, then position name alone (the fallbacks serve rows without a
  * live id link). The code fallback is name-guarded for the same reason as in
  * claimByIdentity: positional codes migrate to neighbouring rows after a
  * deletion, so a bare code match would attribute an orphaned measurement to
- * whichever position inherited its code. Every code of a row's instance
- * range is recognised (a count-2 row owns two codes). Returns the coding
- * row a measurement belongs to, if any.
+ * whichever position inherited its code. The name fallback is
+ * OCCURRENCE-AWARE: repeated positions are separate coding rows now, so the
+ * n-th id-less row named X binds to the n-th coding row named X instead of
+ * piling every repetition onto the first one. Returns the coding row a
+ * measurement belongs to, if any.
  */
 function buildSectionResolver(
   section: CodingSection,
 ): (row: Record<string, unknown>) => CodingRow | undefined {
-  const starts = sectionInstanceStarts(section);
   const byId = new Map<string, CodingRow>();
   const byCodeAndName = new Map<string, CodingRow>();
-  const byName = new Map<string, CodingRow>();
+  const byName = new Map<string, CodingRow[]>();
   for (const cr of section.rows) {
     if (cr.id !== undefined && !byId.has(cr.id)) byId.set(cr.id, cr);
     const nk = normalizePlaceName(cr.name);
-    // Stored row code (legacy base code) + every instance code of the range.
-    const codes = new Set<string>([cr.code]);
-    const start = starts.get(cr) ?? 1;
-    for (let k = 0; k < Math.max(1, Math.floor(cr.count)); k++) {
-      codes.add(formatWorkplaceCode(section.number, start + k));
-    }
-    for (const code of codes) {
-      const ck = `${code}|${nk}`;
-      if (!byCodeAndName.has(ck)) byCodeAndName.set(ck, cr);
-    }
-    if (!byName.has(nk)) byName.set(nk, cr);
+    const ck = `${cr.code}|${nk}`;
+    if (!byCodeAndName.has(ck)) byCodeAndName.set(ck, cr);
+    const bucket = byName.get(nk);
+    if (bucket) bucket.push(cr);
+    else byName.set(nk, [cr]);
   }
+  const nameSeen = new Map<string, number>();
   return (row) => {
     const id = linkIdOf(row);
     if (id !== "") {
@@ -1211,7 +1186,11 @@ function buildSectionResolver(
       const cr = byCodeAndName.get(`${code}|${nk}`);
       if (cr) return cr;
     }
-    return byName.get(nk);
+    const bucket = byName.get(nk);
+    if (!bucket) return undefined;
+    const n = nameSeen.get(nk) ?? 0;
+    nameSeen.set(nk, n + 1);
+    return bucket[Math.min(n, bucket.length - 1)];
   };
 }
 

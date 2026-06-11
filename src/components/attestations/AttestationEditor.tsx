@@ -55,6 +55,26 @@ function applyNormalize(
 }
 
 /**
+ * Write one document slot and run the descriptor's optional bundle-wide
+ * `propagate` pass.  For coding this pushes the refreshed workplace codes
+ * into every linked protocol on each edit (codes are the single source of
+ * truth); for every other document it is a plain slot write.
+ */
+function writeSlot(
+  documents: DocumentsData,
+  descriptor: {
+    key: string;
+    propagate?: (docs: Record<string, Json>) => Record<string, Json>;
+  },
+  value: unknown,
+): DocumentsData {
+  const next = { ...documents, [descriptor.key]: value as Json };
+  return descriptor.propagate
+    ? (descriptor.propagate(next) as DocumentsData)
+    : next;
+}
+
+/**
  * Per-document state for one attestation.  Keys mirror
  * `DocumentDescriptor.key` ("coding", "safety", …); values are the
  * raw form payload.  Storing `unknown` here keeps the editor agnostic
@@ -183,10 +203,7 @@ export function AttestationEditor({
       SYNCABLE_KEYS.has(descriptor.key) && codingSections.length > 0
         ? syncProtocolFromCoding(descriptor.key, seed, codingSections, documents)
         : seed;
-    onChange({
-      ...documents,
-      [descriptor.key]: seeded as Json,
-    });
+    onChange(writeSlot(documents, descriptor, seeded));
     setTouched(false);
     setFatalErrors([]);
     setStatus({ kind: "idle" });
@@ -209,7 +226,7 @@ export function AttestationEditor({
       migrateDocumentData(descriptor.key, current),
     );
     if (migrated !== current) {
-      onChange({ ...documents, [descriptor.key]: migrated as Json });
+      onChange(writeSlot(documents, descriptor, migrated));
     }
   }, [descriptor, documents, onChange]);
 
@@ -232,9 +249,11 @@ export function AttestationEditor({
   function handleFieldChange(next: unknown) {
     if (!descriptor) return;
     // normalize on every change: for coding this performs the full positional
-    // renumbering (ids + codes) after any add / delete / move of rows.
+    // renumbering (ids + codes) after any add / delete / move of rows or
+    // sections; writeSlot then propagates the refreshed codes into every
+    // linked protocol (coding is the single source of truth).
     const normalized = applyNormalize(descriptor, next);
-    onChange({ ...documents, [descriptor.key]: normalized as Json });
+    onChange(writeSlot(documents, descriptor, normalized));
     setTouched(true);
     setStatus({ kind: "idle" });
   }
@@ -245,10 +264,7 @@ export function AttestationEditor({
       descriptor,
       applyCommonToSeed(structuredClone(descriptor.example), commonData ?? null),
     );
-    onChange({
-      ...documents,
-      [descriptor.key]: seed as Json,
-    });
+    onChange(writeSlot(documents, descriptor, seed));
     setTouched(false);
     setFatalErrors([]);
     setStatus({ kind: "idle" });

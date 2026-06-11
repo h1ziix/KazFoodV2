@@ -131,6 +131,16 @@ function ErrorText({ message }: { message?: string }) {
   return <p className="mt-1 text-xs text-rose-600">{message}</p>;
 }
 
+/**
+ * Clamp a parsed number into the field's [min, max] range (when declared by
+ * the schema): out-of-range input is reset to the nearest allowed value.
+ */
+function clampNumber(field: NumberField, n: number): number {
+  if (field.min !== undefined && n < field.min) return field.min;
+  if (field.max !== undefined && n > field.max) return field.max;
+  return n;
+}
+
 const inputClass =
   "w-full rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-sm text-slate-900 shadow-sm transition focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-500/30";
 const inputErrorClass =
@@ -240,6 +250,8 @@ function NumberInput({
         type="number"
         inputMode={field.integer ? "numeric" : "decimal"}
         step={field.integer ? 1 : "any"}
+        min={field.min}
+        max={field.max}
         value={display}
         onChange={(e: ChangeEvent<HTMLInputElement>) => {
           const raw = e.target.value;
@@ -251,7 +263,7 @@ function NumberInput({
           if (Number.isNaN(num)) {
             update(path, field.allowEmptyString ? "" : 0);
           } else {
-            update(path, num);
+            update(path, clampNumber(field, num));
           }
         }}
         className={`${inputClass} ${err ? inputErrorClass : ""}`}
@@ -732,6 +744,8 @@ function CellRenderer({ field, path, value, errors, update }: NodeProps) {
           type="number"
           inputMode={field.integer ? "numeric" : "decimal"}
           step={field.integer ? 1 : "any"}
+          min={field.min}
+          max={field.max}
           value={display}
           onChange={(e) => {
             const raw = e.target.value;
@@ -742,7 +756,9 @@ function CellRenderer({ field, path, value, errors, update }: NodeProps) {
             const n = field.integer ? parseInt(raw, 10) : Number(raw);
             update(
               path,
-              Number.isNaN(n) ? (field.allowEmptyString ? "" : 0) : n,
+              Number.isNaN(n)
+                ? (field.allowEmptyString ? "" : 0)
+                : clampNumber(field, n),
             );
           }}
           className={cls}

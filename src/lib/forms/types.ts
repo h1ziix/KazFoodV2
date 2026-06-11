@@ -50,6 +50,8 @@ export interface NumberField extends FieldBase {
   kind: "number";
   integer: boolean;
   min?: number;
+  /** Upper bound from the zod schema; inputs are clamped into [min, max]. */
+  max?: number;
   /** When true the field also accepts the empty string ("") as a value. */
   allowEmptyString: boolean;
 }

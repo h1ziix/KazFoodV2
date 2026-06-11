@@ -137,54 +137,75 @@ describe("normalizeCodingDocument", () => {
   });
 });
 
-describe("нумерация по рабочим местам (count > 1)", () => {
-  it("строка с count = 2 занимает два номера; следующая строка смещается", () => {
+describe("код — индекс строки; количество на код не влияет", () => {
+  it("count не сдвигает коды соседних строк", () => {
     const n = normalizeCodingDocument(
       codingDoc([
         {
           title: SECTION,
-          rows: [{ name: "А" }, { name: "Уборщик", count: 2 }, { name: "В" }],
+          rows: [{ name: "А" }, { name: "Уборщик", count: 0 }, { name: "В" }],
         },
       ]),
     ) as AnyObj;
 
     expect(n.sections[0].rows.map((r: AnyObj) => r.code)).toEqual([
       "01 001 001",
-      "01 001 002", // Уборщик ×2 занимает 002–003
-      "01 001 004",
+      "01 001 002",
+      "01 001 003",
     ]);
   });
 
-  it("микроклимат: у двух одинаковых должностей разные коды (кейс клиента)", () => {
+  it("микроклимат: повторяющиеся должности — отдельные строки с разными кодами", () => {
     const coding = normalizeCodingDocument(
       codingDoc([
-        { title: SECTION, rows: [{ name: "А" }, { name: "Уборщик", count: 2 }] },
+        {
+          title: SECTION,
+          rows: [{ name: "А" }, { name: "Уборщик" }, { name: "Уборщик" }],
+        },
       ]),
     ) as AnyObj;
     const sections = extractCodingSections(coding);
 
     const meteo = syncProtocolFromCoding("meteo", { places: [] }, sections) as AnyObj;
-    const codes = meteo.places[0].measurements.map((m: AnyObj) => m.code);
-    expect(codes).toEqual(["01 001 001", "01 001 002", "01 001 003"]);
+    const ms = meteo.places[0].measurements;
+    expect(ms.map((m: AnyObj) => m.place)).toEqual(["А", "Уборщик", "Уборщик"]);
+    expect(ms.map((m: AnyObj) => m.code)).toEqual([
+      "01 001 001",
+      "01 001 002",
+      "01 001 003",
+    ]);
 
     // Повторный синк: коды стабильны, ложных орфанов нет.
     const resynced = syncProtocolFromCoding("meteo", meteo, sections) as AnyObj;
     expect(resynced.places[0].measurements.map((m: AnyObj) => m.code)).toEqual(
-      codes,
+      ms.map((m: AnyObj) => m.code),
     );
     expect(getOrphanedMeasurements(resynced, sections)).toEqual([]);
   });
 
+  it("количество 0: строка есть в кодировке, но в протокол измерений не попадает", () => {
+    const coding = normalizeCodingDocument(
+      codingDoc([
+        { title: SECTION, rows: [{ name: "А" }, { name: "Вакансия", count: 0 }] },
+      ]),
+    ) as AnyObj;
+    const sections = extractCodingSections(coding);
+
+    const meteo = syncProtocolFromCoding("meteo", { places: [] }, sections) as AnyObj;
+    expect(meteo.places[0].measurements.map((m: AnyObj) => m.place)).toEqual(["А"]);
+  });
+
   it("таблица измерений перестраивается в порядок кодировки: коды строго 001, 002, 003…", () => {
-    // Сценарий клиента: место посеяно из примера и начинается с
-    // электрослесарей, а Технолог из кодировки в таблице отсутствует.
+    // Сценарий клиента: место посеяно из примера и начинается с двух
+    // электрослесарей (отдельные строки кодировки), а Технолог отсутствует.
     const coding = normalizeCodingDocument(
       codingDoc([
         {
           title: SECTION,
           rows: [
             { name: "Технолог" },
-            { name: "Электро слесарь", count: 2 },
+            { name: "Электро слесарь" },
+            { name: "Электро слесарь" },
             { name: "Лаборант" },
           ],
         },
@@ -210,6 +231,8 @@ describe("нумерация по рабочим местам (count > 1)", () =
     const ms = synced.places[0].measurements;
 
     // Порядок кодировки, коды по порядку с 001 — без дыр и хвостов.
+    // Имя-фолбэк позиционный: первый безымянный «Электро слесарь» ушёл к
+    // первой строке кодировки с этим именем, второй — ко второй.
     expect(ms.map((m: AnyObj) => m.place)).toEqual([
       "Технолог",
       "Электро слесарь",
@@ -230,11 +253,17 @@ describe("нумерация по рабочим местам (count > 1)", () =
     expect(ms.map((m: AnyObj) => m.pointNumber)).toEqual(["1т", "2т", "3т", "4т"]);
   });
 
-  it("миграция перенумеровывает повторы измерений по экземплярам", () => {
-    // Легаси: оба уборщика носят ОДИН код строки кодировки.
+  it("миграция: легаси-коды перешиваются на построчные во всех протоколах", () => {
+    // Легаси: два уборщика — отдельные строки со сквозными кодами 016/017.
     const documents: Record<string, Json> = {
       coding: codingDoc([
-        { title: SECTION, rows: [{ name: "Уборщик", count: 2, code: "01 001 016" }] },
+        {
+          title: SECTION,
+          rows: [
+            { name: "Уборщик", code: "01 001 016" },
+            { name: "Уборщик", code: "01 001 017" },
+          ],
+        },
       ]) as Json,
       meteo: {
         places: [
@@ -243,7 +272,7 @@ describe("нумерация по рабочим местам (count > 1)", () =
             name: SECTION,
             measurements: [
               { rowNumber: 1, pointNumber: "1т", place: "Уборщик", code: "01 001 016", tempMeasured: "21" },
-              { rowNumber: 2, pointNumber: "2т", place: "Уборщик", code: "01 001 016", tempMeasured: "22" },
+              { rowNumber: 2, pointNumber: "2т", place: "Уборщик", code: "01 001 017", tempMeasured: "22" },
             ],
           },
         ],
@@ -254,13 +283,45 @@ describe("нумерация по рабочим местам (count > 1)", () =
     const coding = migrated["coding"] as AnyObj;
     const meteo = migrated["meteo"] as AnyObj;
 
-    expect(coding.sections[0].rows[0].code).toBe("01 001 001");
+    expect(coding.sections[0].rows.map((r: AnyObj) => r.code)).toEqual([
+      "01 001 001",
+      "01 001 002",
+    ]);
     const ms = meteo.places[0].measurements;
     expect(ms.map((m: AnyObj) => m.code)).toEqual(["01 001 001", "01 001 002"]);
-    // Оба повтора привязаны к одной строке кодировки, значения не тронуты.
+    // Каждый повтор привязан к СВОЕЙ строке кодировки, значения не тронуты.
     expect(ms[0].codingRowId).toBe(coding.sections[0].rows[0].id);
-    expect(ms[1].codingRowId).toBe(coding.sections[0].rows[0].id);
+    expect(ms[1].codingRowId).toBe(coding.sections[0].rows[1].id);
     expect(ms.map((m: AnyObj) => m.tempMeasured)).toEqual(["21", "22"]);
+  });
+
+  it("propagate: правка кодировки сразу обновляет коды связанных протоколов", () => {
+    // Бандл с тяжестью, привязанной по id; из кодировки удаляют первую
+    // строку — коды сдвигаются, карточка получает новый код автоматически.
+    const coding = normalizeCodingDocument(
+      codingDoc([{ title: SECTION, rows: [{ name: "А" }, { name: "Б" }] }]),
+    ) as AnyObj;
+    const idB = coding.sections[0].rows[1].id;
+    const heaviness = {
+      workplaces: [
+        { rowNumber: 1, codingRowId: idB, code: "01 001 002", position: "Б", measurementPlace: SECTION },
+      ],
+    };
+
+    // Имитация удаления строки «А» в форме: splice + normalize + propagate
+    // (ровно то, что делает writeSlot в редакторе).
+    const edited = normalizeCodingDocument({
+      ...coding,
+      sections: [{ ...coding.sections[0], rows: [coding.sections[0].rows[1]] }],
+    });
+    const result = migrateWorkplaceCodes({
+      coding: edited as Json,
+      heaviness: heaviness as Json,
+    });
+
+    const card = (result["heaviness"] as AnyObj).workplaces[0];
+    expect(card.code).toBe("01 001 001"); // Б поднялась на позицию 1
+    expect(card.codingRowId).toBe(idB);
   });
 });
 
@@ -452,11 +513,11 @@ describe("травмобезопасность: построчные коды б
       ]),
     ) as AnyObj;
     const sections = extractCodingSections(coding);
-    // В кодировке коды-диапазоны: А=001, Уборщик=002(–003), В=004.
+    // Коды кодировки построчные: count не влияет.
     expect(sections[0].rows.map((r) => r.code)).toEqual([
       "01 001 001",
       "01 001 002",
-      "01 001 004",
+      "01 001 003",
     ]);
 
     const safety = syncProtocolFromCoding("safety", { sections: [] }, sections) as AnyObj;

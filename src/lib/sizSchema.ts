@@ -8,7 +8,8 @@ const rowSchema = z.object({
   codingRowId: z.string().optional(),
   code: nonEmpty,
   position: nonEmpty,
-  count: z.number().int().positive(),
+  // Количество приходит из кодировки, где допустимы 0 и 1.
+  count: z.number().int().min(0),
   // «Нормированный перечень» — необязательное поле: пользователь заполняет его
   // вручную, когда есть данные. Пустое значение допустимо и НЕ ломает валидацию,
   // генерацию DOCX или сохранение. `.optional()` (а не просто z.string()) убирает

@@ -5,22 +5,23 @@
  * │ A workplace code is a purely POSITIONAL, derived display value:             │
  * │                                                                             │
  * │   "01 SSS RRR"                                                              │
- * │    │   │   └── 1-based WORKPLACE INSTANCE number inside the section         │
+ * │    │   │   └── 1-based ROW position inside the section (resets per section) │
  * │    │   └────── 1-based section position inside the coding document          │
  * │    └────────── constant prefix, never changes                               │
  * │                                                                             │
- * │ The third block numbers physical workplaces, not coding rows: a row with    │
- * │ count = N occupies N consecutive numbers and displays the FIRST of them.    │
- * │ So «Уборщик × 2» owns e.g. 016 and 017, and in the measurement protocols    │
- * │ (Микроклимат / Шум / ЭМП / Освещение) the two repetitions show different    │
- * │ codes — equal codes on two workplaces are a bug by definition. The row      │
- * │ after a count-2 row starts at 018.                                          │
+ * │ The third block is the plain row index — the «Количество» field NEVER       │
+ * │ affects the code. Count is restricted to 0 | 1: repeated positions are      │
+ * │ entered as SEPARATE rows, so two «Уборщик» rows naturally get e.g. 016      │
+ * │ and 017 (distinct codes per physical workplace).                            │
  * │                                                                             │
  * │ The code is recomputed from scratch on EVERY structural change (add /       │
- * │ delete / move / count change). It must never be treated as identity: the    │
- * │ stable identity of a coding row is its hidden `id` (uuid), assigned once    │
- * │ and never recomputed. All cross-protocol matching (syncWorkplaces.ts) keys  │
- * │ on the id first and falls back to the code only for legacy rows.            │
+ * │ delete / move row, add / delete section). It must never be treated as       │
+ * │ identity: the stable identity of a coding row is its hidden `id` (uuid),    │
+ * │ assigned once and never recomputed. All cross-protocol matching             │
+ * │ (syncWorkplaces.ts) keys on the id first and falls back to the code only    │
+ * │ for legacy rows. Coding is the single source of truth: every coding edit    │
+ * │ re-propagates current codes into all linked protocols                       │
+ * │ (migrateWorkplaceCodes, wired as the coding descriptor's `propagate`).      │
  * └─────────────────────────────────────────────────────────────────────────────┘
  */
 
@@ -61,22 +62,13 @@ function rowId(row: Record<string, unknown>): string | undefined {
   return typeof row.id === "string" && row.id !== "" ? row.id : undefined;
 }
 
-/** Workplace instances a coding row occupies (count, clamped to ≥ 1). */
-function rowCount(row: Record<string, unknown>): number {
-  const c = row.count;
-  return typeof c === "number" && Number.isFinite(c) && c >= 1
-    ? Math.floor(c)
-    : 1;
-}
-
 /**
  * Bring a raw coding document into canonical form:
  *   - every row gets a stable `id` if it does not have one yet;
  *   - `section.number` is recomputed to the section's 1-based position;
- *   - every `row.code` is recomputed positionally: the row displays the
- *     FIRST workplace-instance number of its range, and a row with
- *     count = N advances the section's instance counter by N (so the next
- *     row starts after all N workplaces).
+ *   - every `row.code` is recomputed as the plain ROW INDEX inside its
+ *     section (1-я строка = 001, 2-я = 002, …) — the «Количество» field
+ *     never affects the code.
  *
  * Pure and idempotent. Unknown fields are preserved; malformed nodes are
  * passed through untouched (zod validation reports them, we never drop data).
@@ -94,11 +86,9 @@ export function normalizeCodingDocument(data: unknown): unknown {
     let rows = s.rows;
     if (Array.isArray(s.rows)) {
       let rowsChanged = false;
-      let instance = 1;
-      const nextRows = s.rows.map((r) => {
+      const nextRows = s.rows.map((r, ri) => {
         if (!isObj(r)) return r;
-        const code = formatWorkplaceCode(number, instance);
-        instance += rowCount(r);
+        const code = formatWorkplaceCode(number, ri + 1);
         const id = rowId(r);
         if (id && r.code === code) return r;
         rowsChanged = true;
@@ -119,14 +109,18 @@ export function normalizeCodingDocument(data: unknown): unknown {
 
 /**
  * Where coding-linked rows live inside each dependent document. Used to walk
- * the persisted bundle when codes are renumbered. One row per coding row —
- * these documents display the row's base code (first instance of the range).
- * Травмобезопасность ходит отдельным walker'ом (remapSafetyRows): её коды —
- * построчные порядковые номера раздела, а не базовые коды диапазонов.
+ * the persisted bundle when coding codes are renumbered: every linked row
+ * (matched by codingRowId, legacy rows by stored code) receives the current
+ * code of its coding row. Травмобезопасность ходит отдельным walker'ом
+ * (remapSafetyRows): её коды — построчные номера её СОБСТВЕННОЙ таблицы.
  */
 const DEPENDENT_SHAPES: Record<string, readonly [string, string]> = {
   siz: ["sections", "rows"],
   summary: ["places", "workplaces"],
+  lighting: ["places", "measurements"],
+  emp: ["places", "measurements"],
+  noise: ["places", "measurements"],
+  meteo: ["places", "measurements"],
 };
 
 /** heaviness / tension keep their rows in a flat top-level array. */
@@ -135,21 +129,11 @@ const FLAT_DEPENDENTS: Record<string, string> = {
   tension: "workplaces",
 };
 
-/**
- * Measurement protocols: one row per WORKPLACE INSTANCE, so the k-th
- * repetition of a coding row gets the k-th code of the row's range.
- */
-const MEASUREMENT_DEPENDENTS = ["lighting", "emp", "noise", "meteo"] as const;
-
 /** Canonical target of one coding row after renumbering. */
 interface RowTarget {
   id: string;
-  /** Base display code = first instance of the row's range. */
+  /** Current positional code of the coding row. */
   code: string;
-  sectionNo: number;
-  /** 1-based first instance number of the row inside its section. */
-  start: number;
-  count: number;
 }
 
 interface CodeMaps {
@@ -193,17 +177,13 @@ export function migrateWorkplaceCodes(
     let rows = s.rows;
     if (Array.isArray(s.rows)) {
       let rowsChanged = false;
-      let instance = 1;
-      const nextRows = s.rows.map((r) => {
+      const nextRows = s.rows.map((r, ri) => {
         if (!isObj(r)) return r;
-        const start = instance;
-        const count = rowCount(r);
-        instance += count;
-        const code = formatWorkplaceCode(number, start);
+        const code = formatWorkplaceCode(number, ri + 1);
         const id = rowId(r) ?? newCodingRowId();
         const oldCode = typeof r.code === "string" ? r.code : "";
 
-        const target: RowTarget = { id, code, sectionNo: number, start, count };
+        const target: RowTarget = { id, code };
         maps.byId.set(id, target);
         if (oldCode !== "" && !maps.byOldCode.has(oldCode)) {
           maps.byOldCode.set(oldCode, target);
@@ -236,13 +216,6 @@ export function migrateWorkplaceCodes(
   }
   for (const [key, listKey] of Object.entries(FLAT_DEPENDENTS)) {
     const remapped = remapFlat(documents[key], listKey, maps);
-    if (remapped !== documents[key]) {
-      next[key] = remapped as Json;
-      bundleChanged = true;
-    }
-  }
-  for (const key of MEASUREMENT_DEPENDENTS) {
-    const remapped = remapMeasurements(documents[key], maps);
     if (remapped !== documents[key]) {
       next[key] = remapped as Json;
       bundleChanged = true;
@@ -359,40 +332,3 @@ function remapRow(row: unknown, maps: CodeMaps): unknown {
   return { ...row, codingRowId: target.id, code: target.code };
 }
 
-/**
- * Remap Class A measurement rows (places[].measurements[]): unlike the flat
- * dependents, the k-th stored repetition of a coding row is the k-th
- * physical workplace and receives the k-th code of the row's instance range
- * («Уборщик × 2» → …016 and …017, never two equal codes). Surplus
- * repetitions (k ≥ count) keep their stored code — the next instance number
- * belongs to the following coding row.
- */
-function remapMeasurements(doc: unknown, maps: CodeMaps): unknown {
-  if (!isObj(doc) || !Array.isArray(doc.places)) return doc;
-  // Occurrence counter per coding row across the whole document (a coding
-  // row's repetitions all live inside one place, in stored order).
-  const seen = new Map<string, number>();
-  let changed = false;
-  const places = doc.places.map((place) => {
-    if (!isObj(place) || !Array.isArray(place.measurements)) return place;
-    let placeChanged = false;
-    const measurements = place.measurements.map((row) => {
-      if (!isObj(row)) return row;
-      const target = resolveTarget(row, maps);
-      if (!target) return row;
-      const k = seen.get(target.id) ?? 0;
-      seen.set(target.id, k + 1);
-      const code =
-        k < target.count
-          ? formatWorkplaceCode(target.sectionNo, target.start + k)
-          : row.code;
-      if (row.code === code && row.codingRowId === target.id) return row;
-      placeChanged = true;
-      return { ...row, codingRowId: target.id, code };
-    });
-    if (!placeChanged) return place;
-    changed = true;
-    return { ...place, measurements };
-  });
-  return changed ? { ...doc, places } : doc;
-}
