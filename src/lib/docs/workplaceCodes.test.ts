@@ -136,8 +136,8 @@ describe("normalizeCodingDocument", () => {
   });
 });
 
-describe("код — индекс строки; количество на код не влияет", () => {
-  it("count не сдвигает коды соседних строк", () => {
+describe("код — индекс аттестуемой строки; количество 0 кода не получает", () => {
+  it("неаттестуемая строка не получает код, аттестуемые нумеруются подряд", () => {
     const n = normalizeCodingDocument(
       codingDoc([
         {
@@ -149,8 +149,8 @@ describe("код — индекс строки; количество на код
 
     expect(n.sections[0].rows.map((r: AnyObj) => r.code)).toEqual([
       "01 001 001",
+      "", // Уборщик (count 0) — без кода
       "01 001 002",
-      "01 001 003",
     ]);
   });
 
@@ -181,16 +181,106 @@ describe("код — индекс строки; количество на код
     );
   });
 
-  it("количество 0: строка есть в кодировке, но в протокол измерений не попадает", () => {
+  it("количество 0: неаттестуемая строка остаётся в кодировке без кода, аттестуемые — подряд", () => {
     const coding = normalizeCodingDocument(
       codingDoc([
-        { title: SECTION, rows: [{ name: "А" }, { name: "Вакансия", count: 0 }] },
+        {
+          title: SECTION,
+          rows: [{ name: "А" }, { name: "Вакансия", count: 0 }, { name: "Б" }],
+        },
+      ]),
+    ) as AnyObj;
+    const rows = coding.sections[0].rows;
+    // Вакансия (0) кода не получает; А и Б нумеруются подряд без дыр.
+    expect(rows.map((r: AnyObj) => r.code)).toEqual([
+      "01 001 001",
+      "",
+      "01 001 002",
+    ]);
+    // id назначается всем строкам, включая неаттестуемую.
+    expect(rows[1].id).toMatch(/\S/);
+  });
+
+  it("количество 0: должность исключается из ВСЕХ протоколов", () => {
+    const coding = normalizeCodingDocument(
+      codingDoc([
+        {
+          title: SECTION,
+          rows: [{ name: "А" }, { name: "Вакансия", count: 0 }, { name: "Б" }],
+        },
       ]),
     ) as AnyObj;
     const sections = extractCodingSections(coding);
 
+    // Класс A — измерения.
     const meteo = syncProtocolFromCoding("meteo", { places: [] }, sections) as AnyObj;
-    expect(meteo.places[0].measurements.map((m: AnyObj) => m.place)).toEqual(["А"]);
+    expect(meteo.places[0].measurements.map((m: AnyObj) => m.place)).toEqual(["А", "Б"]);
+    expect(meteo.places[0].measurements.map((m: AnyObj) => m.code)).toEqual([
+      "01 001 001",
+      "01 001 002",
+    ]);
+
+    // Травмобезопасность — построчная нумерация, тоже без Вакансии и без дыр.
+    const safety = syncProtocolFromCoding("safety", { sections: [] }, sections) as AnyObj;
+    expect(safety.sections[0].rows.map((r: AnyObj) => r.position)).toEqual(["А", "Б"]);
+    expect(safety.sections[0].rows.map((r: AnyObj) => r.code)).toEqual([
+      "01 001 001",
+      "01 001 002",
+    ]);
+
+    // СИЗ, Сводный, Тяжесть, Напряжённость — должности только аттестуемые.
+    const siz = syncProtocolFromCoding("siz", { sections: [] }, sections) as AnyObj;
+    expect(siz.sections[0].rows.map((r: AnyObj) => r.position)).toEqual(["А", "Б"]);
+
+    const summary = syncProtocolFromCoding("summary", { places: [] }, sections) as AnyObj;
+    expect(summary.places[0].workplaces.map((w: AnyObj) => w.profession)).toEqual(["А", "Б"]);
+
+    const heaviness = syncProtocolFromCoding("heaviness", { workplaces: [] }, sections) as AnyObj;
+    expect(heaviness.workplaces.map((w: AnyObj) => w.position)).toEqual(["А", "Б"]);
+
+    const tension = syncProtocolFromCoding("tension", { workplaces: [] }, sections) as AnyObj;
+    expect(tension.workplaces.map((w: AnyObj) => w.position)).toEqual(["А", "Б"]);
+  });
+
+  it("перевод аттестуемой должности в 0 → строка попадает в «удалится» и убирается при синке", () => {
+    const coding = normalizeCodingDocument(
+      codingDoc([{ title: SECTION, rows: [{ name: "А" }, { name: "Б" }] }]),
+    ) as AnyObj;
+    const sections = extractCodingSections(coding);
+
+    // Оба аттестуемы → в Тяжести две карточки; помечаем «Б».
+    let heaviness = syncProtocolFromCoding("heaviness", { workplaces: [] }, sections) as AnyObj;
+    heaviness = {
+      ...heaviness,
+      workplaces: heaviness.workplaces.map((w: AnyObj) =>
+        w.position === "Б" ? { ...w, finalAssessment: "МАРКЕР Б" } : w,
+      ),
+    };
+
+    // «А» переводят в количество 0.
+    const codingAfter = normalizeCodingDocument({
+      ...coding,
+      sections: [
+        {
+          ...coding.sections[0],
+          rows: [{ ...coding.sections[0].rows[0], count: 0 }, coding.sections[0].rows[1]],
+        },
+      ],
+    }) as AnyObj;
+    const sectionsAfter = extractCodingSections(codingAfter);
+
+    // Diff честный: «А» удалится, «Б» сохранится, ничего не добавляется.
+    const diff = computeSyncDiff("heaviness", heaviness, sectionsAfter);
+    expect(diff.toAdd).toBe(0);
+    expect(diff.toUpdate).toBe(1);
+    expect(diff.toDelete.map((d) => d.name)).toEqual(["А"]);
+
+    // После синка «А» нет, «Б» сохранила данные и получила код 001.
+    const synced = syncProtocolFromCoding("heaviness", heaviness, sectionsAfter) as AnyObj;
+    expect(synced.workplaces).toHaveLength(1);
+    expect(synced.workplaces[0].position).toBe("Б");
+    expect(synced.workplaces[0].code).toBe("01 001 001");
+    expect(synced.workplaces[0].finalAssessment).toBe("МАРКЕР Б");
   });
 
   it("таблица измерений перестраивается в порядок кодировки: коды строго 001, 002, 003…", () => {

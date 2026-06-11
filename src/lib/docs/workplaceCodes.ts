@@ -86,9 +86,13 @@ export function normalizeCodingDocument(data: unknown): unknown {
     let rows = s.rows;
     if (Array.isArray(s.rows)) {
       let rowsChanged = false;
-      const nextRows = s.rows.map((r, ri) => {
+      // Код = порядковый номер АТТЕСТУЕМОЙ строки в разделе. Строки с
+      // количеством 0 («не аттестуется») счётчик не увеличивают и кода не
+      // получают (пустой), поэтому коды аттестуемых идут подряд без дыр.
+      let instance = 0;
+      const nextRows = s.rows.map((r) => {
         if (!isObj(r)) return r;
-        const code = formatWorkplaceCode(number, ri + 1);
+        const code = r.count === 0 ? "" : formatWorkplaceCode(number, ++instance);
         const id = rowId(r);
         if (id && r.code === code) return r;
         rowsChanged = true;
@@ -177,16 +181,25 @@ export function migrateWorkplaceCodes(
     let rows = s.rows;
     if (Array.isArray(s.rows)) {
       let rowsChanged = false;
-      const nextRows = s.rows.map((r, ri) => {
+      // Same numbering as normalizeCodingDocument: only assessed rows
+      // (count !== 0) advance the counter and get a code. count = 0 rows are
+      // NOT propagation targets — dependent rows linked to a now-unassessed
+      // coding row keep their stale code until the explicit sync removes them
+      // (mirrors how a deleted coding row has no target).
+      let instance = 0;
+      const nextRows = s.rows.map((r) => {
         if (!isObj(r)) return r;
-        const code = formatWorkplaceCode(number, ri + 1);
+        const assessed = r.count !== 0;
+        const code = assessed ? formatWorkplaceCode(number, ++instance) : "";
         const id = rowId(r) ?? newCodingRowId();
         const oldCode = typeof r.code === "string" ? r.code : "";
 
-        const target: RowTarget = { id, code };
-        maps.byId.set(id, target);
-        if (oldCode !== "" && !maps.byOldCode.has(oldCode)) {
-          maps.byOldCode.set(oldCode, target);
+        if (assessed) {
+          const target: RowTarget = { id, code };
+          maps.byId.set(id, target);
+          if (oldCode !== "" && !maps.byOldCode.has(oldCode)) {
+            maps.byOldCode.set(oldCode, target);
+          }
         }
 
         if (rowId(r) === id && r.code === code) return r;
@@ -272,9 +285,14 @@ function remapSafetyRows(doc: unknown, maps: CodeMaps): unknown {
     const sectionNo =
       typeof sec.number === "number" && sec.number >= 1 ? sec.number : si + 1;
     let secChanged = false;
-    const rows = sec.rows.map((row, ri) => {
+    // Only assessed rows (count !== 0) are numbered; an unassessed row that
+    // still lingers here (until the explicit sync prunes it) gets an empty
+    // code, so the visible column reads 001, 002, 003… without gaps.
+    let instance = 0;
+    const rows = sec.rows.map((row) => {
       if (!isObj(row)) return row;
-      const code = formatWorkplaceCode(sectionNo, ri + 1);
+      const code =
+        row.count === 0 ? "" : formatWorkplaceCode(sectionNo, ++instance);
       const target = resolveTarget(row, maps);
       if (target) {
         if (row.code === code && row.codingRowId === target.id) return row;

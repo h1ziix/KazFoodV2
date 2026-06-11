@@ -87,6 +87,23 @@ export const SYNCABLE_KEYS = new Set([
   "tension",
 ]);
 
+/**
+ * Assessed view of the coding sections: rows with count = 0 («не аттестуется»)
+ * are removed. Every dependent protocol is built and diffed against this view,
+ * so an unassessed position exists only in the Coding document and never
+ * materialises a row anywhere else. Section objects keep their number/title;
+ * CodingRow object identity is preserved (filter, not clone) so byRow maps in
+ * claimByIdentity still resolve. A section all of whose rows are unassessed
+ * becomes empty here and will fail the protocol's min-rows validation — a
+ * visible nudge to assess someone or remove the section, never silent.
+ */
+function assessedSections(sections: CodingSection[]): CodingSection[] {
+  return sections.map((s) => ({
+    ...s,
+    rows: s.rows.filter((r) => r.count !== 0),
+  }));
+}
+
 // ─── Section extraction ───────────────────────────────────────────────────────
 
 /**
@@ -136,20 +153,24 @@ export function computeSyncDiff(
   sections: CodingSection[],
   bundle?: Record<string, unknown> | null,
 ): SyncDiff {
-  if (CLASS_A_KEYS.has(key)) return diffClassA(data, sections);
-  if (key === "safety" || key === "siz") return diffFlatSections(data, sections);
+  // Unassessed coding rows (count = 0) are excluded from every protocol, so
+  // the diff is computed against assessed rows only: such a position is never
+  // counted as "will be added", and a row already in the protocol whose
+  // coding row became unassessed lands in "will be deleted".
+  const a = assessedSections(sections);
+  if (CLASS_A_KEYS.has(key)) return diffClassA(data, a);
+  if (key === "safety" || key === "siz") return diffFlatSections(data, a);
   if (key === "summary") {
-    const structural = diffSummary(data, sections);
+    const structural = diffSummary(data, a);
     if (!bundle) return structural;
     // Values are merged AFTER the structural sync, so the honest count is
     // computed against the structurally-synced result (new workplaces from
     // coding receive their values in the same confirmed action).
-    const afterStructural =
-      sections.length > 0 ? syncSummaryPlaces(data, sections) : data;
+    const afterStructural = a.length > 0 ? syncSummaryPlaces(data, a) : data;
     const values = computeSummaryValuesDiff(afterStructural, bundle);
     return { ...structural, ...values };
   }
-  if (key === "heaviness" || key === "tension") return diffCardWorkplaces(data, sections);
+  if (key === "heaviness" || key === "tension") return diffCardWorkplaces(data, a);
   return { toAdd: 0, toUpdate: 0, toDelete: [] };
 }
 
@@ -199,17 +220,22 @@ export function syncProtocolFromCoding(
   bundle?: Record<string, unknown> | null,
 ): unknown {
   if (sections.length === 0) return data;
-  if (CLASS_A_KEYS.has(key)) return syncMeasurementPlaces(key, data, sections);
-  if (key === "safety") return syncSafetyRows(data, sections);
-  if (key === "siz") return syncSizRows(data, sections);
+  // Unassessed coding rows (count = 0) stay only in the Coding document; they
+  // are filtered out here so NO protocol ever materialises a row for them.
+  // Internal sync functions therefore receive assessed rows only and need no
+  // count-awareness of their own.
+  const a = assessedSections(sections);
+  if (CLASS_A_KEYS.has(key)) return syncMeasurementPlaces(key, data, a);
+  if (key === "safety") return syncSafetyRows(data, a);
+  if (key === "siz") return syncSizRows(data, a);
   if (key === "summary") {
     // Phase 1 — structure from coding; phase 2 — measured values from the
     // lighting / emp / noise / meteo slots of the same attestation bundle.
-    const structural = syncSummaryPlaces(data, sections);
+    const structural = syncSummaryPlaces(data, a);
     return bundle ? mergeSummaryValues(structural, bundle) : structural;
   }
-  if (key === "heaviness") return syncHeavinessWorkplaces(data, sections);
-  if (key === "tension") return syncTensionWorkplaces(data, sections);
+  if (key === "heaviness") return syncHeavinessWorkplaces(data, a);
+  if (key === "tension") return syncTensionWorkplaces(data, a);
   return data;
 }
 
