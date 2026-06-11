@@ -18,6 +18,7 @@ import {
 import {
   computeSyncDiff,
   extractCodingSections,
+  protocolNeedsSync,
   syncProtocolFromCoding,
 } from "@/lib/docs/syncWorkplaces";
 import type { Json } from "@/types/database";
@@ -790,5 +791,83 @@ describe("migrateWorkplaceCodes (бандл-миграция)", () => {
   it("без кодировки бандл не меняется", () => {
     const documents: Record<string, Json> = { cover: { any: 1 } as Json };
     expect(migrateWorkplaceCodes(documents)).toBe(documents);
+  });
+});
+
+describe("protocolNeedsSync — индикатор «требует синхронизации»", () => {
+  function coding2(rows: Array<{ name: string; count?: number }>) {
+    const c = normalizeCodingDocument(codingDoc([{ title: SECTION, rows }])) as AnyObj;
+    return { coding: c, sections: extractCodingSections(c) };
+  }
+
+  it("свежесинхронизированный протокол не требует синхронизации", () => {
+    const { sections } = coding2([{ name: "А" }, { name: "Б" }]);
+    for (const key of ["safety", "siz", "summary", "heaviness", "tension", "meteo"]) {
+      const synced = syncProtocolFromCoding(
+        key,
+        key === "meteo" ? { places: [] } : key === "summary" ? { places: [] } : { sections: [], workplaces: [] },
+        sections,
+      );
+      expect(protocolNeedsSync(key, synced, sections)).toBe(false);
+    }
+  });
+
+  it("добавленная в кодировку должность делает протокол устаревшим", () => {
+    const { sections } = coding2([{ name: "А" }]);
+    const heaviness = syncProtocolFromCoding("heaviness", { workplaces: [] }, sections);
+    // В кодировку добавили «Б» — карточки для неё ещё нет.
+    const { sections: more } = coding2([{ name: "А" }, { name: "Б" }]);
+    expect(protocolNeedsSync("heaviness", heaviness, more)).toBe(true);
+  });
+
+  it("перевод должности в количество 0 делает протокол устаревшим", () => {
+    const { coding, sections } = coding2([{ name: "А" }, { name: "Б" }]);
+    const siz = syncProtocolFromCoding("siz", { sections: [] }, sections);
+    const off = extractCodingSections(
+      normalizeCodingDocument({
+        ...coding,
+        sections: [
+          {
+            ...coding.sections[0],
+            rows: [{ ...coding.sections[0].rows[0], count: 0 }, coding.sections[0].rows[1]],
+          },
+        ],
+      }) as AnyObj,
+    );
+    expect(protocolNeedsSync("siz", siz, off)).toBe(true);
+  });
+
+  it("Class A: недостающее измерение → устарел; полное совпадение → нет", () => {
+    const { sections } = coding2([{ name: "А" }, { name: "Б" }]);
+    const meteo = syncProtocolFromCoding("meteo", { places: [] }, sections) as AnyObj;
+    expect(protocolNeedsSync("meteo", meteo, sections)).toBe(false);
+
+    // Удаляем одну строку измерения вручную — теперь не хватает «Б».
+    const short = {
+      ...meteo,
+      places: meteo.places.map((p: AnyObj) => ({
+        ...p,
+        measurements: p.measurements.slice(0, 1),
+      })),
+    };
+    expect(protocolNeedsSync("meteo", short, sections)).toBe(true);
+  });
+
+  it("осиротевший раздел целиком НЕ считается требующим синхронизации", () => {
+    const { sections } = coding2([{ name: "А" }]);
+    const meteo = syncProtocolFromCoding("meteo", { places: [] }, sections) as AnyObj;
+    // Добавляем лишнее место, которого нет в кодировке (сохраняется при синке).
+    const withOrphan = {
+      ...meteo,
+      places: [
+        ...meteo.places,
+        { number: 9, name: "Удалённый раздел", measurements: [] },
+      ],
+    };
+    expect(protocolNeedsSync("meteo", withOrphan, sections)).toBe(false);
+  });
+
+  it("без заполненной кодировки ничего не устаревает", () => {
+    expect(protocolNeedsSync("heaviness", { workplaces: [] }, [])).toBe(false);
   });
 });

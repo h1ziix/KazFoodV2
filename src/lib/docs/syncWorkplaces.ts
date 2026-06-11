@@ -211,6 +211,94 @@ function diffCardWorkplaces(data: unknown, sections: CodingSection[]): SyncDiff 
   return diffByIdentity(sections, extractWorkplaceCards(data), "position");
 }
 
+// ─── Staleness check (would a sync change the protocol's structure?) ──────────
+
+/**
+ * True when synchronising `key` from coding would add or remove rows — i.e.
+ * the protocol's set of workplaces no longer matches the assessed coding rows
+ * (a position was added, deleted, reordered, or toggled to «не аттестуется»).
+ *
+ * Cheap (Set/Map only, no object rebuilding) so it can drive a per-tab
+ * "requires sync" indicator on every edit. STRUCTURAL only: it ignores value
+ * differences (e.g. summary's pulled measurements) and matched-row identity
+ * refreshes, since automatic code propagation already keeps those current.
+ */
+export function protocolNeedsSync(
+  key: string,
+  data: unknown,
+  sections: CodingSection[],
+): boolean {
+  if (sections.length === 0) return false;
+  const a = assessedSections(sections);
+  if (CLASS_A_KEYS.has(key)) return classANeedsSync(data, a);
+  if (key === "safety" || key === "siz")
+    return flatNeedsSync(a, extractFlatSectionRows(data), "position");
+  if (key === "summary")
+    return flatNeedsSync(a, extractSummaryWorkplaceRows(data), "profession");
+  if (key === "heaviness" || key === "tension")
+    return flatNeedsSync(a, extractWorkplaceCards(data), "position");
+  return false;
+}
+
+/** Class B/C/D: stale if any assessed coding row is unmatched, or any stored
+ *  row matches no assessed coding row. */
+function flatNeedsSync(
+  a: CodingSection[],
+  existing: Record<string, unknown>[],
+  nameKey: "position" | "profession",
+): boolean {
+  const { byRow, unclaimed } = claimByIdentity(a, existing, nameKey);
+  const total = a.reduce((n, s) => n + s.rows.length, 0);
+  return total - byRow.size > 0 || unclaimed.length > 0;
+}
+
+/**
+ * Class A: each assessed coding row must be backed by exactly one measurement
+ * (matched by codingRowId) inside the place named after its section. Missing,
+ * surplus, removed-position or not-yet-linked measurements all mean a sync
+ * would change the table. Orphaned whole places (section absent from coding)
+ * are NOT counted — Class A sync keeps them and they are surfaced separately.
+ */
+function classANeedsSync(data: unknown, a: CodingSection[]): boolean {
+  if (!isObj(data)) return a.some((s) => s.rows.length > 0);
+  const places = arr((data as Record<string, unknown>).places);
+
+  const byTitle = new Map<string, Record<string, unknown>[]>();
+  for (const p of places) {
+    if (!isObj(p)) continue;
+    const place = p as Record<string, unknown>;
+    if (typeof place.name !== "string") continue;
+    const bucket = byTitle.get(place.name) ?? [];
+    bucket.push(place);
+    byTitle.set(place.name, bucket);
+  }
+
+  const occurrence = new Map<string, number>();
+  for (const section of a) {
+    const idx = occurrence.get(section.title) ?? 0;
+    occurrence.set(section.title, idx + 1);
+    const place = (byTitle.get(section.title) ?? [])[idx];
+    if (!place) {
+      if (section.rows.length > 0) return true; // section not represented yet
+      continue;
+    }
+    const expected = new Set(
+      section.rows.map((r) => r.id).filter((id): id is string => !!id),
+    );
+    const seen = new Map<string, number>();
+    for (const m of arr(place.measurements)) {
+      if (!isObj(m)) continue;
+      const id = linkIdOf(m as Record<string, unknown>);
+      if (id === "" || !expected.has(id)) return true; // unlinked / removed / surplus
+      seen.set(id, (seen.get(id) ?? 0) + 1);
+    }
+    for (const id of expected) {
+      if ((seen.get(id) ?? 0) !== 1) return true; // missing or duplicated
+    }
+  }
+  return false;
+}
+
 // ─── Sync dispatcher ──────────────────────────────────────────────────────────
 
 export function syncProtocolFromCoding(

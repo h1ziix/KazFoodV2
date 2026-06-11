@@ -24,6 +24,7 @@ import {
   extractCodingSections,
   syncProtocolFromCoding,
   computeSyncDiff,
+  protocolNeedsSync,
   getOrphanedPlaces,
   removeOrphanedPlace,
   CLASS_A_KEYS,
@@ -167,6 +168,33 @@ export function AttestationEditor({
     return getOrphanedPlaces(storedValue, codingSections);
   }, [descriptor, storedValue, codingSections]);
 
+  // Protocols whose structure no longer matches coding (a position was added /
+  // removed / reordered / set to «не аттестуется» since the last sync). Drives
+  // the amber "requires sync" dot on each tab. Cheap structural check per
+  // protocol; recomputed only when the bundle or coding changes.
+  const staleKeys = useMemo<Set<string>>(() => {
+    const out = new Set<string>();
+    if (codingSections.length === 0) return out;
+    for (const d of DOCUMENT_REGISTRY) {
+      if (d.key === "coding" || !SYNCABLE_KEYS.has(d.key)) continue;
+      if (documents[d.key] === undefined) continue;
+      if (protocolNeedsSync(d.key, documents[d.key], codingSections)) {
+        out.add(d.key);
+      }
+    }
+    return out;
+  }, [documents, codingSections]);
+
+  // Diff for the active protocol — powers the sync panel headline and is
+  // reused on confirm so the click does not recompute it.
+  const activeDiff = useMemo<SyncDiff | null>(() => {
+    if (!descriptor || descriptor.key === "coding") return null;
+    if (!SYNCABLE_KEYS.has(descriptor.key) || codingSections.length === 0) {
+      return null;
+    }
+    return computeSyncDiff(descriptor.key, storedValue, codingSections, documents);
+  }, [descriptor, storedValue, codingSections, documents]);
+
   // Seed missing slots once per tab switch.  We use a ref to skip the
   // effect if the slot is already populated, avoiding any chance of
   // overwriting user edits on re-render.
@@ -259,11 +287,10 @@ export function AttestationEditor({
   }
 
   function handleSyncRequest() {
-    if (!descriptor) return;
-    // The bundle gives the summary access to the lighting / emp / noise /
-    // meteo slots so measured values are pulled in the same action.
-    const diff = computeSyncDiff(descriptor.key, storedValue, codingSections, documents);
-    setSyncPending(diff);
+    if (!activeDiff) return;
+    // activeDiff already reflects the bundle (summary pulls measured values
+    // from the lighting / emp / noise / meteo slots in the same action).
+    setSyncPending(activeDiff);
   }
 
   function handleSyncConfirm() {
@@ -339,6 +366,7 @@ export function AttestationEditor({
           {DOCUMENT_REGISTRY.map((d) => {
             const active = docType === d.key;
             const filled = documents[d.key] !== undefined;
+            const stale = staleKeys.has(d.key);
             return (
               <button
                 key={d.key}
@@ -347,6 +375,7 @@ export function AttestationEditor({
                   setDocType(d.key);
                   setSyncPending(null);
                 }}
+                title={stale ? "Требует синхронизации с кодировкой" : undefined}
                 className={
                   active
                     ? "rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white shadow-sm"
@@ -354,8 +383,14 @@ export function AttestationEditor({
                 }
               >
                 {d.label}
-                {filled && !active && (
-                  <span className="ml-1.5 inline-block h-1.5 w-1.5 rounded-full bg-emerald-500 align-middle" />
+                {/* Amber = structure differs from coding (needs sync);
+                    emerald = filled and in sync. */}
+                {filled && (stale || !active) && (
+                  <span
+                    className={`ml-1.5 inline-block h-1.5 w-1.5 rounded-full align-middle ${
+                      stale ? "bg-amber-500" : "bg-emerald-500"
+                    }`}
+                  />
                 )}
               </button>
             );
@@ -378,16 +413,39 @@ export function AttestationEditor({
       </section>
 
       {showSync && (
-        <section className="rounded-lg border border-slate-200 bg-white px-4 py-3">
+        <section
+          className={`rounded-lg border px-4 py-3 ${
+            descriptor != null && staleKeys.has(descriptor.key)
+              ? "border-amber-300 bg-amber-50/60"
+              : "border-slate-200 bg-white"
+          }`}
+        >
           {syncPending === null ? (
             <div className="flex items-center justify-between gap-3">
-              <p className="text-xs text-slate-500">
-                Рабочие места можно синхронизировать из раздела «Кодировка».
-              </p>
+              {descriptor != null && staleKeys.has(descriptor.key) ? (
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="text-amber-500" aria-hidden="true">
+                    ⚠
+                  </span>
+                  <p className="text-xs font-medium text-amber-800">
+                    Состав рабочих мест отличается от кодировки — требуется
+                    синхронизация.
+                  </p>
+                </div>
+              ) : (
+                <p className="inline-flex items-center gap-1.5 text-xs text-emerald-700">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                  Синхронизировано с кодировкой
+                </p>
+              )}
               <button
                 type="button"
                 onClick={handleSyncRequest}
-                className="shrink-0 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                className={`shrink-0 rounded-md border px-3 py-1.5 text-xs font-medium ${
+                  descriptor != null && staleKeys.has(descriptor.key)
+                    ? "border-amber-400 bg-amber-500 text-white hover:bg-amber-600"
+                    : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50"
+                }`}
               >
                 Синхронизировать из кодировки
               </button>
@@ -567,8 +625,10 @@ function SyncConfirmPanel({
 
       {isClassA && (
         <p className="text-xs text-slate-500">
-          Существующие разделы и все измерения в них сохранятся. Разделы,
-          отсутствующие в кодировке, будут отмечены предупреждением.
+          Состав строк приводится в соответствие с кодировкой: лишние строки и
+          строки удалённых должностей убираются автоматически, недостающие
+          добавляются. Введённые измерения существующих должностей сохраняются.
+          Разделы, отсутствующие в кодировке целиком, отмечаются предупреждением.
         </p>
       )}
 
