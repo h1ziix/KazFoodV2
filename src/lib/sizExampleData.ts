@@ -26,7 +26,8 @@ function row(code: string, position: string): SizRow {
 
 const adminSection: SizSection = {
   number: 1,
-  title: "1. Администрация – 3 рабочих мест",
+  // Raw title — the DOCX generator prepends "1. " at render time.
+  title: "Администрация – 3 рабочих мест",
   rows: [
     row("01 001 001", "Директор"),
     row("01 001 002", "Управляющий производством"),
@@ -46,7 +47,7 @@ const adminSection: SizSection = {
 
 const productionSection: SizSection = {
   number: 2,
-  title: "2. Производственный персонал",
+  title: "Производственный персонал",
   rows: [
     row("01 002 001", "Технолог оператор"),
     row("01 002 002", "Бригадир ремонтно-строительной бригады"),

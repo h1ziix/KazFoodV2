@@ -714,7 +714,11 @@ function syncSafetyRows(data: unknown, sections: CodingSection[]): unknown {
 
   const newSections = sections.map((section) => ({
     number: section.number,
-    title: `${section.number}. ${section.title}`,
+    // Store the RAW section name (no "N. " prefix) — consistent with the
+    // measurement / summary protocols. The DOCX generator (buildSection) adds
+    // the number at render time, so the document is unchanged and there is no
+    // double-numbering if a coding title ever contains a digit.
+    title: section.title,
     rows: section.rows.map((cr, i) => {
       // Построчный код перекрывает базовый код кодировки из linkFields.
       const code = formatWorkplaceCode(section.number, i + 1);
@@ -762,7 +766,11 @@ function syncSizRows(data: unknown, sections: CodingSection[]): unknown {
 
   const newSections = sections.map((section) => ({
     number: section.number,
-    title: `${section.number}. ${section.title}`,
+    // Store the RAW section name (no "N. " prefix) — consistent with the
+    // measurement / summary protocols. The DOCX generator (buildSection) adds
+    // the number at render time, so the document is unchanged and there is no
+    // double-numbering if a coding title ever contains a digit.
+    title: section.title,
     rows: section.rows.map((cr) => {
       const ex = byRow.get(cr);
       return ex

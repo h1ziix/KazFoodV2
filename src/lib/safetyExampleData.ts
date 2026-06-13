@@ -31,7 +31,8 @@ function row(code: string, position: string, count = 1): SafetyRow {
 
 const adminSection: SafetySection = {
   number: 1,
-  title: "1. Административно – управленческий персонал",
+  // Raw title — the DOCX generator prepends "1. " at render time.
+  title: "Административно – управленческий персонал",
   rows: [
     row("01 001 001", "Директор"),
     row("01 001 002", "Управляющий производством"),
@@ -51,7 +52,7 @@ const adminSection: SafetySection = {
 
 const productionSection: SafetySection = {
   number: 2,
-  title: "2. Производственный персонал",
+  title: "Производственный персонал",
   rows: [
     row("01 002 001", "Технолог оператор"),
     row("01 002 002", "Бригадир ремонтно-строительной бригады"),
