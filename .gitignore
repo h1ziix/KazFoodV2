@@ -12,3 +12,9 @@ test-debug.docx
 # Local diagnostic dumps (DOCX unzipped for manual inspection)
 TEMP_UNZIPPED/
 
+# Supabase CLI local state (linked-project ref, pooler url, versions) — per
+# machine, not for the repo. Migration .sql files under supabase/migrations
+# stay tracked.
+supabase/.temp/
+supabase/.branches/
+
