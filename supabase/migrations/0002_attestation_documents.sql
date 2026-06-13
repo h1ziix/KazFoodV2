@@ -36,6 +36,13 @@ create index if not exists attestation_documents_attestation_idx
 -- on every upsert, so a PL/pgSQL trigger (whose `$$`-quoted body trips the
 -- statement-splitting SQL editor) is unnecessary here.
 
+-- Table-level privileges. RLS restricts WHICH rows each user sees, but the
+-- API roles still need base GRANTs to touch the table at all — without these
+-- the app gets "42501 insufficient_privilege". (Tables created via the SQL
+-- editor do not always inherit the default privileges, so grant explicitly.)
+grant select, insert, update, delete
+  on public.attestation_documents to anon, authenticated;
+
 -- ---------------------------------------------------------------------
 -- Row-Level Security
 -- ---------------------------------------------------------------------
