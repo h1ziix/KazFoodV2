@@ -14,6 +14,7 @@ import { defaultFor } from "@/lib/forms/buildFormDescriptor";
 import { getAt, pathKey, setAt } from "@/lib/forms/path";
 import {
   resolveArrayItemName,
+  resolveFieldHint,
   resolveFieldLabel,
   resolveSectionTitle,
 } from "@/lib/forms/labels";
@@ -620,6 +621,11 @@ function TableArray({
   // Item-path is built once per row; column labels resolve against the
   // item path so context-specific overrides still apply.
   const sampleItemPath: FieldPath = [...path, 0];
+  // Columns that carry an explanatory hint (e.g. «Количество» 0/1) — shown as
+  // a header tooltip and a caption under the table for discoverability.
+  const hintedColumns = columns
+    .map((c) => ({ label: resolveFieldLabel([...sampleItemPath, c.key], c.key), hint: resolveFieldHint(c.key) }))
+    .filter((c): c is { label: string; hint: string } => Boolean(c.hint));
 
   if (items.length === 0) {
     return (
@@ -642,6 +648,7 @@ function TableArray({
                 [...sampleItemPath, c.key],
                 c.key,
               );
+              const hint = resolveFieldHint(c.key);
               return (
                 <th
                   key={c.key}
@@ -650,6 +657,15 @@ function TableArray({
                   {label}
                   {c.required && !c.readOnly && (
                     <span className="ml-0.5 text-rose-600">*</span>
+                  )}
+                  {hint && (
+                    <span
+                      title={hint}
+                      className="ml-1 cursor-help text-slate-400"
+                      aria-label={hint}
+                    >
+                      ⓘ
+                    </span>
                   )}
                 </th>
               );
@@ -697,6 +713,16 @@ function TableArray({
           ))}
         </tbody>
       </table>
+      {hintedColumns.length > 0 && (
+        <ul className="flex flex-col gap-0.5 border-t border-slate-100 bg-slate-50/60 px-3 py-2 text-[11px] text-slate-500">
+          {hintedColumns.map((c) => (
+            <li key={c.label}>
+              <span className="font-medium text-slate-600">{c.label}:</span>{" "}
+              {c.hint}
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

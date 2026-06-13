@@ -512,6 +512,26 @@ export function resolveFieldLabel(path: FieldPath, key: string): string {
   return humaniseFallback(key);
 }
 
+/* ------------------------------------------------------------------ */
+/* Field hints (short help text shown next to a field / column)        */
+/* ------------------------------------------------------------------ */
+
+const FIELD_HINTS: Record<string, string> = {
+  // «Количество» is 0 | 1 everywhere now: 1 = a real workplace, 0 = the
+  // position stays in Coding but is not assessed (excluded from every protocol).
+  count:
+    "1 — рабочее место; 0 — должность остаётся в кодировке, но не аттестуется " +
+    "(в протоколы не попадёт). Повторяющиеся должности — отдельными строками.",
+};
+
+/**
+ * Optional one-line help text for a field, keyed by its schema key.
+ * `undefined` when the field has no hint.
+ */
+export function resolveFieldHint(key: string): string | undefined {
+  return FIELD_HINTS[key];
+}
+
 /**
  * Title of a top-level / nested section (object group).
  * Adds a contextual qualifier when sensible.
@@ -551,4 +571,5 @@ export const Labels = {
   field: resolveFieldLabel,
   section: resolveSectionTitle,
   item: resolveArrayItemName,
+  hint: resolveFieldHint,
 };
