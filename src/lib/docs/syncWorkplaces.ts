@@ -824,8 +824,22 @@ function syncSummaryPlaces(data: unknown, sections: CodingSection[]): unknown {
  */
 
 /**
- * Heaviness sync. Existing cards (claimed by coding-row id) are preserved;
- * every new card gets the single universal norm cloned in. See BUSINESS RULE.
+ * A card counts as "filled" once it has a non-empty final assessment.
+ * Auto-created blank cards (finalAssessment "") — e.g. from a brand-new
+ * section synced before the uniform-norm rule — are re-filled with the
+ * universal norm on the next sync; genuinely filled cards are preserved.
+ */
+function hasNormContent(card: Record<string, unknown>): boolean {
+  return (
+    typeof card.finalAssessment === "string" &&
+    card.finalAssessment.trim() !== ""
+  );
+}
+
+/**
+ * Heaviness sync. A card already filled by the user (claimed by coding-row id
+ * AND having a final assessment) is preserved; every other card — new, or an
+ * auto-created blank — gets the single universal norm. See BUSINESS RULE.
  */
 function syncHeavinessWorkplaces(data: unknown, sections: CodingSection[]): unknown {
   if (!isObj(data)) return data;
@@ -838,7 +852,7 @@ function syncHeavinessWorkplaces(data: unknown, sections: CodingSection[]): unkn
     for (const cr of section.rows) {
       const n = rowNumber++;
       const ex = byRow.get(cr);
-      if (ex) {
+      if (ex && hasNormContent(ex)) {
         workplaces.push({ ...ex, rowNumber: n, ...linkFields(cr), position: cr.name, measurementPlace: section.title });
         continue;
       }
@@ -858,8 +872,9 @@ function syncHeavinessWorkplaces(data: unknown, sections: CodingSection[]): unkn
 // ─── Class D — Tension ────────────────────────────────────────────────────────
 
 /**
- * Tension sync. Same model as heaviness: existing cards (claimed by coding-row
- * id) are preserved; every new card gets the single universal norm.
+ * Tension sync. Same model as heaviness: a card already filled by the user is
+ * preserved; every other card — new or an auto-created blank — gets the single
+ * universal norm.
  */
 function syncTensionWorkplaces(data: unknown, sections: CodingSection[]): unknown {
   if (!isObj(data)) return data;
@@ -872,7 +887,7 @@ function syncTensionWorkplaces(data: unknown, sections: CodingSection[]): unknow
     for (const cr of section.rows) {
       const n = rowNumber++;
       const ex = byRow.get(cr);
-      if (ex) {
+      if (ex && hasNormContent(ex)) {
         workplaces.push({ ...ex, rowNumber: n, ...linkFields(cr), position: cr.name, measurementPlace: section.title });
         continue;
       }
