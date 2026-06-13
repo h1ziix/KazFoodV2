@@ -153,6 +153,37 @@ export async function touchAttestation(id: string): Promise<string> {
   return data.updated_at;
 }
 
+/**
+ * Optimistic-concurrency claim: apply the header/common columns AND bump the
+ * version, but ONLY if the row's current `updated_at` still equals
+ * `expectedUpdatedAt`. Returns the new `updated_at` on success, or null when
+ * the version no longer matches (another device/tab saved in between) — the
+ * caller treats null as a conflict and writes nothing further.
+ *
+ * The match is an instant comparison done by Postgres (the column is
+ * timestamptz), so the round-tripped ISO string compares correctly. The
+ * before-update trigger sets updated_at = now(); the WHERE clause is evaluated
+ * against the pre-update value, so the gate is exact and atomic.
+ */
+export async function claimAttestationVersion(
+  id: string,
+  expectedUpdatedAt: string,
+  colPatch: AttestationUpdate,
+): Promise<string | null> {
+  const { supabase } = await requireUserId();
+  const { updated_at: _ignored, ...safe } = colPatch;
+  void _ignored;
+  const { data, error } = await supabase
+    .from("attestations")
+    .update({ ...safe, updated_at: new Date().toISOString() })
+    .eq("id", id)
+    .eq("updated_at", expectedUpdatedAt)
+    .select("updated_at")
+    .maybeSingle();
+  if (error) throw error;
+  return data?.updated_at ?? null;
+}
+
 export interface CreateAttestationInput {
   title?: string;
   customer_name?: string;

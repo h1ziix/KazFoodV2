@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import {
+  claimAttestationVersion,
   createAttestation,
   deleteAttestation,
   deleteAttestationDocuments,
@@ -60,25 +61,21 @@ export interface SaveAttestationPayload {
   };
 }
 
+/**
+ * Save outcome. `conflict` means another tab/device saved since this client
+ * last loaded (`expectedUpdatedAt` no longer matches); nothing was written, so
+ * the client must reload rather than silently overwrite the other version.
+ */
+export type SaveAttestationResult =
+  | { updated_at: string }
+  | { conflict: true; updated_at: string };
+
 export async function saveAttestationAction(
   id: string,
   payload: SaveAttestationPayload,
-): Promise<{ updated_at: string }> {
-  // 1. Per-document writes.
-  let docsChanged = false;
-  if (payload.documents) {
-    const { upserts, removed } = payload.documents;
-    if (Object.keys(upserts).length > 0) {
-      await upsertAttestationDocuments(id, upserts);
-      docsChanged = true;
-    }
-    if (removed.length > 0) {
-      await deleteAttestationDocuments(id, removed);
-      docsChanged = true;
-    }
-  }
-
-  // 2. Header / common columns on the attestations row.
+  expectedUpdatedAt: string,
+): Promise<SaveAttestationResult> {
+  // Header / common columns destined for the attestations row.
   const colPatch: AttestationUpdate = {};
   if (payload.title !== undefined) colPatch.title = payload.title;
   if (payload.customer_name !== undefined)
@@ -86,17 +83,39 @@ export async function saveAttestationAction(
   if (payload.customer_address !== undefined)
     colPatch.customer_address = payload.customer_address;
   if (payload.common_data !== undefined) colPatch.common_data = payload.common_data;
+  const hasCols = Object.keys(colPatch).length > 0;
 
-  // 3. Resolve the fresh updated_at and revalidate only if something changed.
-  let updated_at: string;
-  if (Object.keys(colPatch).length > 0) {
-    updated_at = (await updateAttestation(id, colPatch)).updated_at;
-  } else if (docsChanged) {
-    // Document writes don't touch the parent row, so bump it explicitly.
-    updated_at = await touchAttestation(id);
-  } else {
+  const upserts = payload.documents?.upserts ?? {};
+  const removed = payload.documents?.removed ?? [];
+  const hasDocs = Object.keys(upserts).length > 0 || removed.length > 0;
+
+  // Nothing actually changed → no write, no conflict possible.
+  if (!hasCols && !hasDocs) {
     return { updated_at: await getAttestationUpdatedAt(id) };
   }
+
+  // Optimistic-concurrency claim FIRST: atomically apply the column changes
+  // and bump the version, but only if our expected version is still current.
+  // Once claimed, no other stale save can succeed, so the per-document writes
+  // below are safe.
+  let updated_at = await claimAttestationVersion(id, expectedUpdatedAt, colPatch);
+  if (updated_at === null) {
+    const current = await getAttestationUpdatedAt(id);
+    // Distinguish a real concurrent edit from a spurious timestamp-format miss
+    // by comparing instants: only a genuinely different version is a conflict.
+    if (new Date(current).getTime() !== new Date(expectedUpdatedAt).getTime()) {
+      return { conflict: true, updated_at: current };
+    }
+    // Same instant — the equality filter just didn't match the string form;
+    // the version is unchanged, so apply unconditionally.
+    updated_at = hasCols
+      ? (await updateAttestation(id, colPatch)).updated_at
+      : await touchAttestation(id);
+  }
+
+  // Per-document writes (version already claimed above).
+  if (Object.keys(upserts).length > 0) await upsertAttestationDocuments(id, upserts);
+  if (removed.length > 0) await deleteAttestationDocuments(id, removed);
 
   // Only invalidate the list view — the editor manages its own state.
   revalidatePath("/attestations");

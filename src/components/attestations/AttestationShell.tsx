@@ -36,7 +36,10 @@ type SaveState =
   | { kind: "dirty" }
   | { kind: "saving" }
   | { kind: "saved"; savedAt: string }
-  | { kind: "error"; message: string };
+  | { kind: "error"; message: string }
+  // Another tab/device saved since we loaded; autosave is halted until the
+  // user reloads (which discards local unsaved edits) to avoid overwriting it.
+  | { kind: "conflict" };
 
 const AUTOSAVE_DEBOUNCE_MS = 1500;
 /** First retry delay after a failed save; doubles each attempt up to the cap. */
@@ -167,12 +170,17 @@ export function AttestationShell({
   // Consecutive failed-save count; drives the exponential retry backoff and
   // is reset on success or on a fresh user edit.
   const retryRef = useRef(0);
+  // Set once a save returns a version conflict: autosave halts (further saves
+  // would also conflict and could overwrite the other device) until reload.
+  const conflictRef = useRef(false);
 
   const flush = useCallback(async () => {
     if (timerRef.current) {
       clearTimeout(timerRef.current);
       timerRef.current = null;
     }
+    // Halted after a conflict — only a reload can resume saving.
+    if (conflictRef.current) return;
     // A save is already running: re-check shortly instead of starting a
     // second concurrent write. Once the in-flight save finishes, this retry
     // persists the LATEST snapshot (snapshotRef is always current).
@@ -194,7 +202,16 @@ export function AttestationShell({
     savingRef.current = true;
     setSave({ kind: "saving" });
     try {
-      const { updated_at } = await saveAttestationAction(id, patch);
+      const result = await saveAttestationAction(id, patch, lastSavedAtRef.current);
+      if ("conflict" in result) {
+        // Another device saved since we loaded. Do NOT advance the baseline
+        // (that would let the next save overwrite the other version) and do
+        // NOT retry — halt and ask the user to reload.
+        conflictRef.current = true;
+        setSave({ kind: "conflict" });
+        return;
+      }
+      const { updated_at } = result;
       // Advance the baseline to exactly what we sent, so the next diff is
       // computed against the freshly persisted state.
       lastSavedRef.current = sent;
@@ -232,6 +249,9 @@ export function AttestationShell({
       isFirstRunRef.current = false;
       return;
     }
+    // Once in conflict, further edits can't be saved until reload — keep the
+    // conflict banner up rather than flipping to "dirty"/scheduling a save.
+    if (conflictRef.current) return;
     // A fresh edit supersedes any pending retry and resets its backoff.
     retryRef.current = 0;
     setSave({ kind: "dirty" });
@@ -279,7 +299,14 @@ export function AttestationShell({
       if (unsavedRef.current) {
         const patch = buildSavePatch(snapshotRef.current, lastSavedRef.current);
         if (Object.keys(patch).length > 0) {
-          void saveAttestationAction(id, patch).catch(() => {});
+          // Version-gated like every save: if another device got there first
+          // this no-ops rather than clobbering. unsavedRef excludes "conflict",
+          // so we never reach here while already in a known conflict.
+          void saveAttestationAction(
+            id,
+            patch,
+            lastSavedAtRef.current,
+          ).catch(() => {});
         }
       }
     };
@@ -301,13 +328,32 @@ export function AttestationShell({
           <button
             type="button"
             onClick={() => void flush()}
-            disabled={save.kind === "saving"}
+            disabled={save.kind === "saving" || save.kind === "conflict"}
             className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
           >
             Сохранить
           </button>
         </span>
       </nav>
+
+      {save.kind === "conflict" && (
+        <div className="flex flex-col gap-2 rounded-md border border-rose-300 bg-rose-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+          <p className="text-sm text-rose-800">
+            <span aria-hidden="true">⚠ </span>
+            Эта аттестация была изменена в другом окне или на другом устройстве.
+            Чтобы не затереть те изменения, сохранение здесь приостановлено.
+            Обновите страницу, чтобы загрузить актуальную версию — несохранённые
+            изменения в этом окне будут потеряны.
+          </p>
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="shrink-0 rounded-md bg-rose-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-rose-700"
+          >
+            Обновить страницу
+          </button>
+        </div>
+      )}
 
       <header className="flex flex-col gap-3 border-b border-slate-200 pb-4">
         <label className="flex flex-col gap-1">
@@ -380,6 +426,12 @@ function SaveBadge({ state }: { state: SaveState }) {
       return (
         <span className="text-xs text-rose-700" title={state.message}>
           Не сохранено — повторная попытка…
+        </span>
+      );
+    case "conflict":
+      return (
+        <span className="text-xs font-medium text-rose-700">
+          Конфликт версий — обновите страницу
         </span>
       );
   }
