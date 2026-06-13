@@ -39,6 +39,39 @@ const RETRY_MAX_MS = 30000;
 /** Re-check interval used to serialise a save requested while one is in flight. */
 const SAVE_BUSY_RECHECK_MS = 500;
 
+/** Full, always-present snapshot of the persisted columns. */
+interface Snapshot {
+  title: string;
+  customer_name: string;
+  customer_address: string;
+  documents_data: DocumentsData;
+  common_data: Json;
+}
+
+/**
+ * Build a minimal save payload containing ONLY the columns that differ from
+ * what was last persisted. Strings compare by value; documents_data and
+ * common_data compare by reference — both get a fresh object identity from
+ * their state setters whenever (and only when) they actually change, so a
+ * title edit never re-sends the heavy documents blob and vice-versa.
+ */
+function buildSavePatch(
+  current: Snapshot,
+  lastSaved: Snapshot,
+): SaveAttestationPayload {
+  const patch: SaveAttestationPayload = {};
+  if (current.title !== lastSaved.title) patch.title = current.title;
+  if (current.customer_name !== lastSaved.customer_name)
+    patch.customer_name = current.customer_name;
+  if (current.customer_address !== lastSaved.customer_address)
+    patch.customer_address = current.customer_address;
+  if (current.documents_data !== lastSaved.documents_data)
+    patch.documents_data = current.documents_data;
+  if (current.common_data !== lastSaved.common_data)
+    patch.common_data = current.common_data;
+  return patch;
+}
+
 /**
  * Editor shell for a single attestation row.
  *
@@ -80,7 +113,7 @@ export function AttestationShell({
 
   // Latest snapshot ref — read by the timer so we always persist the
   // freshest values, not the ones captured at scheduling time.
-  const snapshotRef = useRef<SaveAttestationPayload>({
+  const snapshotRef = useRef<Snapshot>({
     title,
     customer_name: customerName,
     customer_address: customerAddress,
@@ -96,6 +129,12 @@ export function AttestationShell({
       common_data: commonData as unknown as Json,
     };
   }, [title, customerName, customerAddress, documents, commonData]);
+
+  // What was last persisted to the DB. The next save diffs against this and
+  // sends only the changed columns. Seeded with the server values from page
+  // load (they are already persisted), and advanced on every successful save.
+  const lastSavedRef = useRef<Snapshot>(snapshotRef.current);
+  const lastSavedAtRef = useRef<string>(initialUpdatedAt);
 
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // True while a save request is in flight — used to serialise overlapping
@@ -118,13 +157,24 @@ export function AttestationShell({
       return;
     }
 
+    // Send only the columns that changed since the last successful save.
+    const sent = snapshotRef.current;
+    const patch = buildSavePatch(sent, lastSavedRef.current);
+    if (Object.keys(patch).length === 0) {
+      // Nothing changed (e.g. a manual save after everything is persisted).
+      retryRef.current = 0;
+      setSave({ kind: "saved", savedAt: lastSavedAtRef.current });
+      return;
+    }
+
     savingRef.current = true;
     setSave({ kind: "saving" });
     try {
-      const { updated_at } = await saveAttestationAction(
-        id,
-        snapshotRef.current,
-      );
+      const { updated_at } = await saveAttestationAction(id, patch);
+      // Advance the baseline to exactly what we sent, so the next diff is
+      // computed against the freshly persisted state.
+      lastSavedRef.current = sent;
+      lastSavedAtRef.current = updated_at;
       retryRef.current = 0;
       setSave({ kind: "saved", savedAt: updated_at });
       // Refresh the server tree so the listing page sees the fresh
@@ -203,7 +253,10 @@ export function AttestationShell({
   useEffect(() => {
     return () => {
       if (unsavedRef.current) {
-        void saveAttestationAction(id, snapshotRef.current).catch(() => {});
+        const patch = buildSavePatch(snapshotRef.current, lastSavedRef.current);
+        if (Object.keys(patch).length > 0) {
+          void saveAttestationAction(id, patch).catch(() => {});
+        }
       }
     };
   }, [id]);

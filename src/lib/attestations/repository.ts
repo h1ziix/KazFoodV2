@@ -62,6 +62,22 @@ export async function getAttestation(id: string): Promise<AttestationRow | null>
   return data;
 }
 
+/**
+ * Cheap timestamp read used by autosave when a save is requested but no
+ * column actually changed — avoids an empty UPDATE while still returning a
+ * coherent `updated_at` for the save badge.
+ */
+export async function getAttestationUpdatedAt(id: string): Promise<string> {
+  const { supabase } = await requireUserId();
+  const { data, error } = await supabase
+    .from("attestations")
+    .select("updated_at")
+    .eq("id", id)
+    .single();
+  if (error) throw error;
+  return data.updated_at;
+}
+
 export interface CreateAttestationInput {
   title?: string;
   customer_name?: string;
