@@ -5,9 +5,12 @@ import { redirect } from "next/navigation";
 import {
   createAttestation,
   deleteAttestation,
+  deleteAttestationDocuments,
   duplicateAttestation,
   getAttestationUpdatedAt,
+  touchAttestation,
   updateAttestation,
+  upsertAttestationDocuments,
 } from "./repository";
 import type { AttestationUpdate, Json } from "@/types/database";
 
@@ -41,42 +44,61 @@ export async function duplicateAttestationAction(id: string) {
 /**
  * Autosave entry point. Every field is optional: the browser-side editor
  * diffs the current snapshot against what was last persisted and sends ONLY
- * the columns that actually changed. Editing the title no longer re-sends the
- * heavy `documents_data` blob, and editing a document no longer re-sends the
- * header / common-data columns. The whole-`documents_data`-column write is
- * still atomic when a document changes (deleting a tab works), but it is no
- * longer sent on unrelated edits.
+ * what changed. Header / common columns go to the attestations row; documents
+ * are written PER KEY to attestation_documents (upserts for changed docs,
+ * removed for dropped tabs) — so editing one document no longer rewrites the
+ * whole project, and editing the header no longer touches the documents.
  */
 export interface SaveAttestationPayload {
   title?: string;
   customer_name?: string;
   customer_address?: string;
-  documents_data?: Record<string, Json>;
   common_data?: Json;
+  documents?: {
+    upserts: Record<string, Json>;
+    removed: string[];
+  };
 }
 
 export async function saveAttestationAction(
   id: string,
   payload: SaveAttestationPayload,
 ): Promise<{ updated_at: string }> {
-  const patch: AttestationUpdate = {};
-  if (payload.title !== undefined) patch.title = payload.title;
-  if (payload.customer_name !== undefined)
-    patch.customer_name = payload.customer_name;
-  if (payload.customer_address !== undefined)
-    patch.customer_address = payload.customer_address;
-  if (payload.documents_data !== undefined)
-    patch.documents_data = payload.documents_data;
-  if (payload.common_data !== undefined) patch.common_data = payload.common_data;
+  // 1. Per-document writes.
+  let docsChanged = false;
+  if (payload.documents) {
+    const { upserts, removed } = payload.documents;
+    if (Object.keys(upserts).length > 0) {
+      await upsertAttestationDocuments(id, upserts);
+      docsChanged = true;
+    }
+    if (removed.length > 0) {
+      await deleteAttestationDocuments(id, removed);
+      docsChanged = true;
+    }
+  }
 
-  // Defensive: an empty patch means nothing changed — skip the UPDATE (an
-  // empty PostgREST update would error) and just report the current timestamp.
-  if (Object.keys(patch).length === 0) {
+  // 2. Header / common columns on the attestations row.
+  const colPatch: AttestationUpdate = {};
+  if (payload.title !== undefined) colPatch.title = payload.title;
+  if (payload.customer_name !== undefined)
+    colPatch.customer_name = payload.customer_name;
+  if (payload.customer_address !== undefined)
+    colPatch.customer_address = payload.customer_address;
+  if (payload.common_data !== undefined) colPatch.common_data = payload.common_data;
+
+  // 3. Resolve the fresh updated_at and revalidate only if something changed.
+  let updated_at: string;
+  if (Object.keys(colPatch).length > 0) {
+    updated_at = (await updateAttestation(id, colPatch)).updated_at;
+  } else if (docsChanged) {
+    // Document writes don't touch the parent row, so bump it explicitly.
+    updated_at = await touchAttestation(id);
+  } else {
     return { updated_at: await getAttestationUpdatedAt(id) };
   }
 
-  const row = await updateAttestation(id, patch);
   // Only invalidate the list view — the editor manages its own state.
   revalidatePath("/attestations");
-  return { updated_at: row.updated_at };
+  return { updated_at };
 }

@@ -21,6 +21,12 @@ interface AttestationShellProps {
   initialCustomerName: string;
   initialCustomerAddress: string;
   initialDocuments: DocumentsData;
+  /**
+   * What is actually persisted (pre code-migration). Used as the save-diff
+   * baseline so any load-time migration fix-up is persisted per-document on
+   * the first edit; equals initialDocuments (same refs) for canonical data.
+   */
+  initialDocumentsBaseline: DocumentsData;
   initialUpdatedAt: string;
   initialCommonData: CommonData;
 }
@@ -49,11 +55,11 @@ interface Snapshot {
 }
 
 /**
- * Build a minimal save payload containing ONLY the columns that differ from
- * what was last persisted. Strings compare by value; documents_data and
- * common_data compare by reference — both get a fresh object identity from
- * their state setters whenever (and only when) they actually change, so a
- * title edit never re-sends the heavy documents blob and vice-versa.
+ * Build a minimal save payload containing ONLY what differs from the last
+ * persisted state. Header strings compare by value; common_data by reference.
+ * Documents are diffed PER KEY (each document value keeps its reference until
+ * it actually changes), so a save carries just the edited document(s) plus any
+ * dropped tabs — never the whole project.
  */
 function buildSavePatch(
   current: Snapshot,
@@ -65,10 +71,19 @@ function buildSavePatch(
     patch.customer_name = current.customer_name;
   if (current.customer_address !== lastSaved.customer_address)
     patch.customer_address = current.customer_address;
-  if (current.documents_data !== lastSaved.documents_data)
-    patch.documents_data = current.documents_data;
   if (current.common_data !== lastSaved.common_data)
     patch.common_data = current.common_data;
+
+  const cur = current.documents_data;
+  const prev = lastSaved.documents_data;
+  const upserts: Record<string, Json> = {};
+  for (const key of Object.keys(cur)) {
+    if (cur[key] !== prev[key]) upserts[key] = cur[key];
+  }
+  const removed = Object.keys(prev).filter((key) => !(key in cur));
+  if (Object.keys(upserts).length > 0 || removed.length > 0) {
+    patch.documents = { upserts, removed };
+  }
   return patch;
 }
 
@@ -95,6 +110,7 @@ export function AttestationShell({
   initialCustomerName,
   initialCustomerAddress,
   initialDocuments,
+  initialDocumentsBaseline,
   initialUpdatedAt,
   initialCommonData,
 }: AttestationShellProps) {
@@ -131,9 +147,17 @@ export function AttestationShell({
   }, [title, customerName, customerAddress, documents, commonData]);
 
   // What was last persisted to the DB. The next save diffs against this and
-  // sends only the changed columns. Seeded with the server values from page
-  // load (they are already persisted), and advanced on every successful save.
-  const lastSavedRef = useRef<Snapshot>(snapshotRef.current);
+  // sends only what changed; advanced on every successful save. The documents
+  // baseline is the PERSISTED bundle (pre code-migration), so a load-time
+  // migration fix-up is saved per-document on the first edit instead of being
+  // silently dropped.
+  const lastSavedRef = useRef<Snapshot>({
+    title: initialTitle,
+    customer_name: initialCustomerName,
+    customer_address: initialCustomerAddress,
+    documents_data: initialDocumentsBaseline,
+    common_data: initialCommonData as unknown as Json,
+  });
   const lastSavedAtRef = useRef<string>(initialUpdatedAt);
 
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);

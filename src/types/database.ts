@@ -59,6 +59,33 @@ export interface AttestationUpdate {
   updated_at?: string;
 }
 
+/**
+ * One per-document form snapshot — see supabase/migrations/0002.
+ * A row per (attestation, DocumentDescriptor.key), so editing one document
+ * no longer rewrites the whole `attestations.documents_data` blob.
+ */
+export interface AttestationDocumentRow {
+  [key: string]: unknown;
+  attestation_id: string;
+  key: string;
+  data: Json;
+  updated_at: string;
+}
+
+export interface AttestationDocumentInsert {
+  [key: string]: unknown;
+  attestation_id: string;
+  key: string;
+  data: Json;
+  updated_at?: string;
+}
+
+export interface AttestationDocumentUpdate {
+  [key: string]: unknown;
+  data?: Json;
+  updated_at?: string;
+}
+
 export interface Database {
   public: {
     Tables: {
@@ -66,6 +93,12 @@ export interface Database {
         Row: AttestationRow;
         Insert: AttestationInsert;
         Update: AttestationUpdate;
+        Relationships: [];
+      };
+      attestation_documents: {
+        Row: AttestationDocumentRow;
+        Insert: AttestationDocumentInsert;
+        Update: AttestationDocumentUpdate;
         Relationships: [];
       };
     };

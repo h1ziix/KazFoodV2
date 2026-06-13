@@ -78,6 +78,81 @@ export async function getAttestationUpdatedAt(id: string): Promise<string> {
   return data.updated_at;
 }
 
+// ─── Per-document storage (attestation_documents) ────────────────────────────
+
+/**
+ * Load every document of a project as a { key: data } bundle — the same
+ * shape the editor and DOCX generators expect. Source of truth since the
+ * 0002 migration (the monolithic documents_data column is kept frozen as a
+ * backup).
+ */
+export async function getAttestationDocuments(
+  id: string,
+): Promise<Record<string, Json>> {
+  const { supabase } = await requireUserId();
+  const { data, error } = await supabase
+    .from("attestation_documents")
+    .select("key,data")
+    .eq("attestation_id", id);
+  if (error) throw error;
+  const out: Record<string, Json> = {};
+  for (const row of data ?? []) out[row.key] = row.data;
+  return out;
+}
+
+/** Upsert the given document keys (only the ones that changed). */
+export async function upsertAttestationDocuments(
+  id: string,
+  upserts: Record<string, Json>,
+): Promise<void> {
+  const keys = Object.keys(upserts);
+  if (keys.length === 0) return;
+  const { supabase } = await requireUserId();
+  const now = new Date().toISOString();
+  const rows = keys.map((key) => ({
+    attestation_id: id,
+    key,
+    data: upserts[key],
+    updated_at: now,
+  }));
+  const { error } = await supabase
+    .from("attestation_documents")
+    .upsert(rows, { onConflict: "attestation_id,key" });
+  if (error) throw error;
+}
+
+/** Delete document keys removed from the bundle (e.g. a dropped tab). */
+export async function deleteAttestationDocuments(
+  id: string,
+  keys: string[],
+): Promise<void> {
+  if (keys.length === 0) return;
+  const { supabase } = await requireUserId();
+  const { error } = await supabase
+    .from("attestation_documents")
+    .delete()
+    .eq("attestation_id", id)
+    .in("key", keys);
+  if (error) throw error;
+}
+
+/**
+ * Bump the parent row's updated_at when only document rows changed (those
+ * writes don't touch the attestations row, so its trigger wouldn't fire).
+ * Returns the fresh timestamp for the save badge / list ordering.
+ */
+export async function touchAttestation(id: string): Promise<string> {
+  const { supabase } = await requireUserId();
+  const { data, error } = await supabase
+    .from("attestations")
+    .update({ updated_at: new Date().toISOString() })
+    .eq("id", id)
+    .select("updated_at")
+    .single();
+  if (error) throw error;
+  return data.updated_at;
+}
+
 export interface CreateAttestationInput {
   title?: string;
   customer_name?: string;
@@ -149,20 +224,22 @@ export async function deleteAttestation(id: string): Promise<void> {
  * Magnum #2) that share most of the data and only differ in a few
  * fields the user then edits in the duplicate.
  *
- * We deliberately copy `documents_data`, `approval_data`, `common_data`,
- * `customer_name` and `customer_address` verbatim — the user can then
- * change only what differs.  The title is suffixed with " (копия)" so
- * the two rows are visually distinct in the list view.
+ * Header / common / approval fields are copied verbatim; the per-document
+ * forms are copied from the `attestation_documents` rows (the source of
+ * truth — the frozen `documents_data` column is NOT used). The title is
+ * suffixed with " (копия)" so the two rows are visually distinct.
  */
 export async function duplicateAttestation(id: string): Promise<AttestationRow> {
   const source = await getAttestation(id);
   if (!source) throw new Error("Attestation not found");
-  return createAttestation({
+  const documents = await getAttestationDocuments(id);
+  const copy = await createAttestation({
     title: `${source.title} (копия)`,
     customer_name: source.customer_name,
     customer_address: source.customer_address,
-    documents_data: source.documents_data,
     approval_data: source.approval_data,
     common_data: source.common_data,
   });
+  await upsertAttestationDocuments(copy.id, documents);
+  return copy;
 }
