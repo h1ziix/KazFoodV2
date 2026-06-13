@@ -17,6 +17,10 @@ import {
 } from "@/lib/docs/registry";
 import { migrateDocumentData } from "@/lib/attestations/migrate";
 import {
+  generateAllDocx,
+  type BatchExportResult,
+} from "@/lib/docs/generateAll";
+import {
   applyCommonDefaults,
   applyCommonToSeed,
 } from "@/lib/docs/applyCommonData";
@@ -39,6 +43,11 @@ type Status =
   | { kind: "idle" }
   | { kind: "generating" }
   | { kind: "generated"; message: string };
+
+type BatchState =
+  | { kind: "idle" }
+  | { kind: "running" }
+  | { kind: "done"; result: BatchExportResult };
 
 /**
  * Run the descriptor's optional normalize pass (pure, idempotent).  For
@@ -128,6 +137,7 @@ export function AttestationEditor({
   const [fatalErrors, setFatalErrors] = useState<string[]>([]);
   const [status, setStatus] = useState<Status>({ kind: "idle" });
   const [syncPending, setSyncPending] = useState<SyncDiff | null>(null);
+  const [batch, setBatch] = useState<BatchState>({ kind: "idle" });
 
   const descriptor = useMemo(() => findDescriptor(docType), [docType]);
 
@@ -350,6 +360,27 @@ export function AttestationEditor({
     }
   }
 
+  async function handleGenerateAll() {
+    setBatch({ kind: "running" });
+    try {
+      const result = await generateAllDocx(documents, commonData);
+      setBatch({ kind: "done", result });
+    } catch (err) {
+      setBatch({
+        kind: "done",
+        result: {
+          generated: [],
+          skipped: [
+            {
+              label: "Все документы",
+              reason: err instanceof Error ? err.message : String(err),
+            },
+          ],
+        },
+      });
+    }
+  }
+
   const currentLabel = descriptor?.label ?? "";
   const isClassA = descriptor != null && CLASS_A_KEYS.has(descriptor.key);
   const showSync =
@@ -527,6 +558,33 @@ export function AttestationEditor({
         </div>
       )}
 
+      {batch.kind === "done" && (
+        <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-sm">
+          {batch.result.generated.length > 0 ? (
+            <p className="text-emerald-800">
+              Скачан архив: {batch.result.generated.length}{" "}
+              {plural(batch.result.generated.length, [
+                "документ",
+                "документа",
+                "документов",
+              ])}
+              .
+            </p>
+          ) : (
+            <p className="text-rose-800">Нет документов, готовых к выгрузке.</p>
+          )}
+          {batch.result.skipped.length > 0 && (
+            <p className="mt-1 text-xs text-slate-500">
+              Пропущены:{" "}
+              {batch.result.skipped
+                .map((s) => `${s.label} (${s.reason})`)
+                .join(", ")}
+              .
+            </p>
+          )}
+        </div>
+      )}
+
       <ValidationErrors title="Ошибка генерации" issues={fatalErrors} />
 
       <div className="sticky bottom-0 -mx-6 mt-2 flex items-center justify-between gap-3 border-t border-slate-200 bg-white/95 px-6 py-3 shadow-[0_-4px_12px_-8px_rgba(0,0,0,0.12)] backdrop-blur">
@@ -545,14 +603,25 @@ export function AttestationEditor({
             </span>
           )}
         </div>
-        <button
-          type="button"
-          onClick={handleGenerate}
-          disabled={!validation.ok || status.kind === "generating"}
-          className="rounded-md bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {status.kind === "generating" ? "Генерация..." : "Сгенерировать DOCX"}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={handleGenerateAll}
+            disabled={batch.kind === "running"}
+            title="Сгенерировать все заполненные документы одним ZIP-архивом"
+            className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {batch.kind === "running" ? "Сборка архива…" : "Скачать все (ZIP)"}
+          </button>
+          <button
+            type="button"
+            onClick={handleGenerate}
+            disabled={!validation.ok || status.kind === "generating"}
+            className="rounded-md bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {status.kind === "generating" ? "Генерация..." : "Сгенерировать DOCX"}
+          </button>
+        </div>
       </div>
     </section>
   );

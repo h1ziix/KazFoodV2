@@ -128,16 +128,54 @@ export interface RenderDocumentOptions<T> {
 }
 
 /**
+ * Fetch + render a document to a Blob WITHOUT downloading it. Shared by the
+ * single-document path (renderDocument) and the batch ZIP export.
+ */
+export async function produceDocument<T>(
+  opts: RenderDocumentOptions<T>,
+): Promise<{ blob: Blob; filename: string }> {
+  const buffer = await fetchTemplate(opts.templateUrl);
+  const blob = renderBlob(buffer, opts.buildContext(opts.data), opts.postProcess);
+  return { blob, filename: opts.filename(opts.data) };
+}
+
+/**
  * Browser-side: fetch template, render with buildContext(data), saveAs filename(data).
  */
 export async function renderDocument<T>(
   opts: RenderDocumentOptions<T>,
 ): Promise<void> {
-  const buffer = await fetchTemplate(opts.templateUrl);
-  const blob = renderBlob(
-    buffer,
-    opts.buildContext(opts.data),
-    opts.postProcess,
-  );
-  saveAs(blob, opts.filename(opts.data));
+  const { blob, filename } = await produceDocument(opts);
+  saveAs(blob, filename);
+}
+
+/** Trigger a browser download of an already-produced blob. */
+export function saveBlob(blob: Blob, filename: string): void {
+  saveAs(blob, filename);
+}
+
+/**
+ * Bundle several produced documents into a single .zip blob. Keeps the PizZip
+ * dependency inside the engine (the one allowed boundary). Sanitises and
+ * de-duplicates entry names so colliding filenames don't overwrite each other.
+ */
+export async function zipDocuments(
+  entries: { filename: string; blob: Blob }[],
+): Promise<Blob> {
+  const zip = new PizZip();
+  const used = new Set<string>();
+  for (const entry of entries) {
+    let name = entry.filename;
+    if (used.has(name)) {
+      const dot = name.lastIndexOf(".");
+      const base = dot === -1 ? name : name.slice(0, dot);
+      const ext = dot === -1 ? "" : name.slice(dot);
+      let n = 2;
+      while (used.has(`${base} (${n})${ext}`)) n += 1;
+      name = `${base} (${n})${ext}`;
+    }
+    used.add(name);
+    zip.file(name, await entry.blob.arrayBuffer());
+  }
+  return zip.generate({ type: "blob", mimeType: "application/zip" });
 }

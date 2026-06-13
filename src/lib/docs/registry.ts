@@ -1,6 +1,6 @@
 import type { z } from "zod";
 import type PizZip from "pizzip";
-import { renderDocument } from "./engine";
+import { produceDocument, renderDocument } from "./engine";
 import { restartListNumberingPerLoop } from "./numberingRestart";
 import { injectCommonData } from "./commonDataInjector";
 import {
@@ -172,6 +172,24 @@ export function renderDescriptor<T>(
   commonData?: CommonData | null,
 ): Promise<void> {
   return renderDocument({
+    templateUrl: desc.templateUrl,
+    data,
+    buildContext: (d) => injectCommonData(desc.buildContext(d), commonData),
+    filename: desc.filename,
+    postProcess: desc.postProcess,
+  });
+}
+
+/**
+ * Like renderDescriptor, but returns the produced { blob, filename } instead
+ * of downloading it — used by the batch ZIP export.
+ */
+export function produceDescriptor<T>(
+  desc: DocumentDescriptor<T>,
+  data: T,
+  commonData?: CommonData | null,
+): Promise<{ blob: Blob; filename: string }> {
+  return produceDocument({
     templateUrl: desc.templateUrl,
     data,
     buildContext: (d) => injectCommonData(desc.buildContext(d), commonData),
