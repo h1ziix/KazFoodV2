@@ -224,7 +224,11 @@ function upsertFactors(
   for (const spec of FACTOR_SPECS) {
     if (consumed.has(spec.key)) continue;
     const src = values[spec.key];
-    if (!src || (src.actual === "" && src.norm === "")) continue;
+    // Create a NEW factor only when there is a MEASURED value. A known norm
+    // alone (e.g. the default noise norm 70, or EMP allowed limits) must not
+    // spawn an empty-actual factor row in the summary — the summary lists
+    // measured results. An existing factor still gets its norm refreshed above.
+    if (!src || src.actual === "") continue;
     appended.push({
       name: spec.name,
       method: spec.method,
