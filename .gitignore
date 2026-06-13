@@ -18,3 +18,8 @@ TEMP_UNZIPPED/
 supabase/.temp/
 supabase/.branches/
 
+# Manual DB backups / dumps — contain real data, never commit.
+backup*.sql
+*.dump.sql
+supabase/backups/
+
