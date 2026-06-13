@@ -1,28 +1,24 @@
 import type { TensionProtocol, TensionWorkplace } from "@/types/tension";
-import { resolveTensionNormativeByPosition } from "@/lib/tensionTemplates";
+import { UNIVERSAL_TENSION_NORMATIVE } from "@/lib/tensionTemplates";
 
 const ADMIN_SECTION = "Административно – управленческий персонал";
 
 /**
- * Карточка административно-управленческого персонала. Нормативная часть берётся
- * из общего реестра шаблонов по должности (профили — из эталонного DOCX), чтобы
- * пример и синхронизация из кодировки не расходились.
+ * Карточка должности. Нормы у всех одинаковые (единая норма
+ * UNIVERSAL_TENSION_NORMATIVE — профиль АУП), так же как их проставляет
+ * синхронизация из кодировки, поэтому пример и синк не расходятся.
  */
 function adminWorkplace(
   rowNumber: number,
   code: string,
   position: string,
 ): TensionWorkplace {
-  const normative = resolveTensionNormativeByPosition(position, ADMIN_SECTION);
-  if (!normative) {
-    throw new Error(`tensionExample: нет норматива для должности "${position}"`);
-  }
   return {
     rowNumber,
     code,
     position,
     measurementPlace: ADMIN_SECTION,
-    ...structuredClone(normative),
+    ...structuredClone(UNIVERSAL_TENSION_NORMATIVE),
   };
 }
 

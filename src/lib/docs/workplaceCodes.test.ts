@@ -898,3 +898,96 @@ describe("protocolNeedsSync — индикатор «требует синхро
     expect(protocolNeedsSync("heaviness", { workplaces: [] }, [])).toBe(false);
   });
 });
+
+describe("тяжесть/напряжённость: единая норма для всех должностей", () => {
+  /** Карточка без полей идентичности — остаётся только нормативная часть. */
+  function normOnly(card: AnyObj): AnyObj {
+    const {
+      rowNumber: _r,
+      code: _c,
+      position: _p,
+      measurementPlace: _m,
+      codingRowId: _id,
+      ...norm
+    } = card;
+    return norm;
+  }
+
+  for (const key of ["heaviness", "tension"] as const) {
+    it(`новый раздел получает ту же норму, что и первый (${key})`, () => {
+      const coding = normalizeCodingDocument(
+        codingDoc([
+          { title: "АУП", rows: [{ name: "Директор" }, { name: "Бухгалтер" }] },
+          {
+            title: "Совершенно новый раздел",
+            rows: [{ name: "Невиданная должность" }],
+          },
+        ]),
+      ) as AnyObj;
+      const sections = extractCodingSections(coding);
+
+      const synced = syncProtocolFromCoding(
+        key,
+        { workplaces: [] },
+        sections,
+      ) as AnyObj;
+      const cards = synced.workplaces as AnyObj[];
+      expect(cards).toHaveLength(3);
+
+      const norms = cards.map(normOnly);
+      // Норма второй должности первого раздела совпадает с первой…
+      expect(norms[1]).toEqual(norms[0]);
+      // …и должность в СОВЕРШЕННО НОВОМ разделе — та же норма.
+      expect(norms[2]).toEqual(norms[0]);
+      // Норма не пустая (карточка не выпадает blank).
+      expect(cards[0].finalAssessment).not.toBe("");
+      expect(cards[2].finalAssessment).not.toBe("");
+    });
+  }
+
+  it("пустая карточка (без итоговой оценки) дозаполняется единой нормой при синке", () => {
+    const coding = normalizeCodingDocument(
+      codingDoc([{ title: "Новый раздел", rows: [{ name: "авыа" }] }]),
+    ) as AnyObj;
+    const sections = extractCodingSections(coding);
+    const id = coding.sections[0].rows[0].id;
+
+    // Карточка уже существует (привязана по id), но норма пустая — как будто
+    // её создал прежний код для нового раздела.
+    const blank = {
+      workplaces: [
+        {
+          rowNumber: 1,
+          codingRowId: id,
+          code: "01 001 001",
+          position: "авыа",
+          measurementPlace: "Новый раздел",
+          finalAssessment: "",
+        },
+      ],
+    };
+
+    const synced = syncProtocolFromCoding("tension", blank, sections) as AnyObj;
+    const card = synced.workplaces[0];
+    expect(card.finalAssessment).not.toBe("");
+    expect(card.p1_1_content).toBeDefined();
+  });
+
+  it("вручную заполненная карточка не перезаписывается единой нормой", () => {
+    const coding = normalizeCodingDocument(
+      codingDoc([{ title: "АУП", rows: [{ name: "Директор" }] }]),
+    ) as AnyObj;
+    const sections = extractCodingSections(coding);
+
+    let h = syncProtocolFromCoding("heaviness", { workplaces: [] }, sections) as AnyObj;
+    h = {
+      ...h,
+      workplaces: h.workplaces.map((w: AnyObj) => ({
+        ...w,
+        finalAssessment: "РУЧНАЯ ОЦЕНКА",
+      })),
+    };
+    const resynced = syncProtocolFromCoding("heaviness", h, sections) as AnyObj;
+    expect(resynced.workplaces[0].finalAssessment).toBe("РУЧНАЯ ОЦЕНКА");
+  });
+});

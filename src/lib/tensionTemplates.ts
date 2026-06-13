@@ -247,6 +247,16 @@ export const tensionNormativeBySection: Record<string, TensionNormative> = {
   [SECTION_PRODUCTION]: tensionNormative("1111222211222112222212"), // типовой рабочий
 };
 
+/**
+ * ЕДИНАЯ норма напряжённости для ВСЕХ должностей любого раздела (по решению
+ * клиента: нормы одинаковые у всех). Эталон — профиль АУП (как «Директор»).
+ * Применяется ко всем новым карточкам при синхронизации; заполненные вручную
+ * карточки не перезаписываются.
+ */
+export const UNIVERSAL_TENSION_NORMATIVE: TensionNormative = tensionNormative(
+  "2222111211122121112212",
+);
+
 /** Приводит ключ (должность/секция) к каноничному виду для устойчивого поиска. */
 function normalizeKey(value: string): string {
   return value

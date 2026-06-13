@@ -34,16 +34,8 @@ import {
   computeSummaryValuesDiff,
   mergeSummaryValues,
 } from "@/lib/docs/syncSummaryValues";
-import {
-  HEAVINESS_WORK_DESCRIPTION,
-  resolveHeavinessNormativeByPosition,
-  resolveHeavinessNormativeBySection,
-} from "@/lib/heavinessTemplates";
-import {
-  TENSION_WORK_DESCRIPTION,
-  resolveTensionNormativeByPosition,
-  resolveTensionNormativeBySection,
-} from "@/lib/tensionTemplates";
+import { UNIVERSAL_HEAVINESS_NORMATIVE } from "@/lib/heavinessTemplates";
+import { UNIVERSAL_TENSION_NORMATIVE } from "@/lib/tensionTemplates";
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -816,107 +808,61 @@ function syncSummaryPlaces(data: unknown, sections: CodingSection[]): unknown {
 
 /**
  * ┌─ BUSINESS RULE — DO NOT BREAK ─────────────────────────────────────────────┐
- * │ The coding row's stable `id` (mirrored as `codingRowId`) is the single      │
- * │ source of truth for a position in the Heaviness (and Tension) protocol.     │
+ * │ Identity of a card is the coding row's stable `id` (mirrored as            │
+ * │ `codingRowId`); matching is via claimByIdentity (id first, legacy code      │
+ * │ fallback). `code` / `position` / `measurementPlace` are display data        │
+ * │ refreshed from coding — never matching keys.                                │
  * │                                                                             │
- * │ • The CODE is a derived, positional display value ("01" + section + row,    │
- * │   see workplaceCodes.ts). It is renumbered when rows are added / deleted /  │
- * │   moved, so matching by code would shift user data onto neighbouring        │
- * │   positions after any structural edit. Code matching exists ONLY as the     │
- * │   legacy fallback inside claimByIdentity for cards that predate ids.        │
- * │ • The position NAME is display data, NOT a key. Names repeat across the     │
- * │   coding (e.g. «Технолог оператор» exists in both АУП and production), so   │
- * │   matching by name would silently cross-contaminate cards.                  │
- * │ • Normative templates are keyed by section+position name                    │
- * │   (`resolveHeavinessNormativeByPosition`) — they may not be keyed by code,  │
- * │   because positional codes are client-specific and unstable by design.     │
- * │                                                                             │
- * │ If you add new matching logic here, key it on `codingRowId` (exact match).  │
- * │ Never make `position`/`name`/`code` the primary key.                        │
+ * │ NORMS ARE UNIFORM (client decision): every NEW card in every section gets   │
+ * │ the SINGLE universal normative (UNIVERSAL_HEAVINESS_NORMATIVE /             │
+ * │ UNIVERSAL_TENSION_NORMATIVE — the АУП profile). There is no per-position    │
+ * │ or per-section differentiation any more, so adding a brand-new section      │
+ * │ auto-fills its positions with the same norms as sections 1 & 2. Cards the   │
+ * │ user already filled (claimed by id) are preserved verbatim and never        │
+ * │ overwritten.                                                                │
  * └─────────────────────────────────────────────────────────────────────────────┘
  */
 
-const DH = { value: "", class: "1" } as const;
-
-function defaultHeaviness(
-  rowNumber: number,
-  code: string,
-  position: string,
-  measurementPlace: string,
-): Record<string, unknown> {
-  return {
-    rowNumber,
-    code,
-    position,
-    measurementPlace,
-    workDescription: HEAVINESS_WORK_DESCRIPTION,
-    finalAssessment: "",
-    p1_1_regional: { ...DH },
-    p1_2_general_1to5: { ...DH },
-    p1_2_general_over5: { ...DH },
-    p2_1_alternating: { ...DH },
-    p2_2_constant: { ...DH },
-    p2_3_fromSurface: { ...DH },
-    p2_3_fromFloor: { ...DH },
-    p3_1_local: { ...DH },
-    p3_2_regional: { ...DH },
-    p4_1_oneHand: { ...DH },
-    p4_2_twoHands: { ...DH },
-    p4_3_bodyAndLegs: { ...DH },
-    p5_pose: { ...DH },
-    p6_bends: { ...DH },
-    p7_1_horizontal: { ...DH },
-    p7_2_vertical: { ...DH },
-  };
+/**
+ * A card counts as "filled" once it has a non-empty final assessment.
+ * Auto-created blank cards (finalAssessment "") — e.g. from a brand-new
+ * section synced before the uniform-norm rule — are re-filled with the
+ * universal norm on the next sync; genuinely filled cards are preserved.
+ */
+function hasNormContent(card: Record<string, unknown>): boolean {
+  return (
+    typeof card.finalAssessment === "string" &&
+    card.finalAssessment.trim() !== ""
+  );
 }
 
 /**
- * Heaviness sync with normative inheritance.
- *
- * IDENTITY IS THE CODING-ROW ID (see the BUSINESS RULE block above). Cards are
- * matched to coding rows via claimByIdentity — id first, legacy code fallback.
- * `code` / `position` / `measurementPlace` are refreshed from coding as
- * display data only.
- *
- * The normative part (workDescription, finalAssessment, 17 indicators) of a NEW
- * card is filled, in priority order:
- *   1. existing card claimed by the same coding row → preserved verbatim
- *      (user's data);
- *   2. a normative pinned to the POSITION (section-aware: «секция+должность»
- *      first, then plain position name) → applied, beating generic sibling
- *      inheritance. Section-aware keys disambiguate same-named positions in
- *      different sections (e.g. «Технолог оператор» АУП ≠ производство);
- *   3. an already-filled sibling card in the same section → inherited (so the
- *      user fills one position and the rest of the section follows on re-sync);
- *   4. a predefined normative by section → applied;
- *   5. otherwise a blank default (no template exists — empty is allowed).
+ * Heaviness sync. A card already filled by the user (claimed by coding-row id
+ * AND having a final assessment) is preserved; every other card — new, or an
+ * auto-created blank — gets the single universal norm. See BUSINESS RULE.
  */
 function syncHeavinessWorkplaces(data: unknown, sections: CodingSection[]): unknown {
   if (!isObj(data)) return data;
   const d = data as Record<string, unknown>;
   const { byRow } = claimByIdentity(sections, extractWorkplaceCards(d));
-  const siblingBySection = firstCardBySection(d);
 
   let rowNumber = 1;
   const workplaces: Record<string, unknown>[] = [];
   for (const section of sections) {
-    const sibling = siblingBySection.get(normalizePlaceName(section.title));
     for (const cr of section.rows) {
       const n = rowNumber++;
       const ex = byRow.get(cr);
-      if (ex) {
+      if (ex && hasNormContent(ex)) {
         workplaces.push({ ...ex, rowNumber: n, ...linkFields(cr), position: cr.name, measurementPlace: section.title });
         continue;
       }
-      const normative =
-        resolveHeavinessNormativeByPosition(cr.name, section.title) ??
-        sibling ??
-        resolveHeavinessNormativeBySection(section.title);
-      workplaces.push(
-        normative
-          ? { ...cloneCard(normative), rowNumber: n, ...linkFields(cr), position: cr.name, measurementPlace: section.title }
-          : { ...defaultHeaviness(n, cr.code, cr.name, section.title), ...linkFields(cr) },
-      );
+      workplaces.push({
+        ...cloneCard(UNIVERSAL_HEAVINESS_NORMATIVE),
+        rowNumber: n,
+        ...linkFields(cr),
+        position: cr.name,
+        measurementPlace: section.title,
+      });
     }
   }
 
@@ -925,97 +871,33 @@ function syncHeavinessWorkplaces(data: unknown, sections: CodingSection[]): unkn
 
 // ─── Class D — Tension ────────────────────────────────────────────────────────
 
-const DT = { value: "", class: "1" } as const;
-
-function defaultTension(
-  rowNumber: number,
-  code: string,
-  position: string,
-  measurementPlace: string,
-): Record<string, unknown> {
-  return {
-    rowNumber,
-    code,
-    position,
-    measurementPlace,
-    // Единый текст описания (как в heaviness). finalAssessment оставляем пустым:
-    // если профессии нет ни в одном реестре нормативов, пустая итоговая оценка
-    // подсветит карточку как требующую внимания, а не проставит «Допустимый».
-    workDescription: TENSION_WORK_DESCRIPTION,
-    finalAssessment: "",
-    p1_1_content: { ...DT },
-    p1_2_signals: { ...DT },
-    p1_3_distribution: { ...DT },
-    p1_4_character: { ...DT },
-    p2_1_duration: { ...DT },
-    p2_2_density: { ...DT },
-    p2_3_objects: { ...DT },
-    p2_4_sizeLong: { ...DT },
-    p2_5_optical: { ...DT },
-    p2_6_videoTerminal: { ...DT },
-    p2_7_voiceLoad: { ...DT },
-    p2_8_speakLoad: { ...DT },
-    p3_1_responsibility: { ...DT },
-    p3_2_risk: { ...DT },
-    p3_3_othersRisk: { ...DT },
-    p4_1_elements: { ...DT },
-    p4_2_duration: { ...DT },
-    p4_3_active: { ...DT },
-    p4_4_passive: { ...DT },
-    p5_1_duration: { ...DT },
-    p5_2_shift: { ...DT },
-    p5_3_breaks: { ...DT },
-  };
-}
-
 /**
- * Tension sync with normative inheritance.
- *
- * IDENTITY IS THE CODING-ROW ID (same rule as heaviness): existing cards are
- * matched via claimByIdentity — id first, legacy code fallback. `code` /
- * `position` / `measurementPlace` are refreshed from coding as display data.
- *
- * The normative part of a NEW card is filled, in priority order:
- *   1. existing card claimed by the same coding row → preserved verbatim;
- *   2. a normative pinned to the POSITION (section-aware: «секция+должность»
- *      first, then plain position name) → applied. Section+position is used
- *      because tension profiles differ per profession (a whole section is NOT
- *      one profile), and positional codes are client-specific and unstable so
- *      they can't pin the reference profiles;
- *   3. an already-filled sibling card in the same section → inherited;
- *   4. a normative by section → applied;
- *   5. otherwise a blank default (finalAssessment empty → flags for attention).
- *
- * Note the position-normative beats the sibling (step 2 before 3): positions in
- * one section have DIFFERENT profiles (e.g. АУП has 13 distinct ones), so
- * copying the first filled neighbour would mis-fill — the registry must win.
+ * Tension sync. Same model as heaviness: a card already filled by the user is
+ * preserved; every other card — new or an auto-created blank — gets the single
+ * universal norm.
  */
 function syncTensionWorkplaces(data: unknown, sections: CodingSection[]): unknown {
   if (!isObj(data)) return data;
   const d = data as Record<string, unknown>;
   const { byRow } = claimByIdentity(sections, extractWorkplaceCards(d));
-  const siblingBySection = firstCardBySection(d);
 
   let rowNumber = 1;
   const workplaces: Record<string, unknown>[] = [];
   for (const section of sections) {
-    const sibling = siblingBySection.get(normalizePlaceName(section.title));
     for (const cr of section.rows) {
       const n = rowNumber++;
       const ex = byRow.get(cr);
-      if (ex) {
+      if (ex && hasNormContent(ex)) {
         workplaces.push({ ...ex, rowNumber: n, ...linkFields(cr), position: cr.name, measurementPlace: section.title });
         continue;
       }
-      const normative =
-        resolveTensionNormativeByPosition(cr.name, section.title) ??
-        sibling ??
-        resolveTensionNormativeBySection(section.title);
-      workplaces.push(
-        normative
-          ? { ...cloneCard(normative), rowNumber: n, ...linkFields(cr), position: cr.name, measurementPlace: section.title }
-          : { ...defaultTension(n, cr.code, cr.name, section.title), ...linkFields(cr) },
-      );
+      workplaces.push({
+        ...cloneCard(UNIVERSAL_TENSION_NORMATIVE),
+        rowNumber: n,
+        ...linkFields(cr),
+        position: cr.name,
+        measurementPlace: section.title,
+      });
     }
   }
 
@@ -1234,26 +1116,6 @@ function extractWorkplaceCards(data: unknown): Record<string, unknown>[] {
   return arr((data as Record<string, unknown>).workplaces).flatMap((wp) =>
     isObj(wp) ? [wp as Record<string, unknown>] : [],
   );
-}
-
-/**
- * First existing card per section (keyed by normalised measurementPlace), used
- * as the section-level normative template for newly added positions — the
- * Class-D analogue of Class A's sectionTemplate. The user fills one card of a
- * section and every other position in it inherits on the next sync.
- */
-function firstCardBySection(
-  d: Record<string, unknown>,
-): Map<string, Record<string, unknown>> {
-  const map = new Map<string, Record<string, unknown>>();
-  for (const wp of arr(d.workplaces)) {
-    if (!isObj(wp)) continue;
-    const w = wp as Record<string, unknown>;
-    if (typeof w.measurementPlace !== "string") continue;
-    const key = normalizePlaceName(w.measurementPlace);
-    if (!map.has(key)) map.set(key, w);
-  }
-  return map;
 }
 
 /**
