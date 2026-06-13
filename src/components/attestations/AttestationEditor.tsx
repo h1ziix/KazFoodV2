@@ -53,10 +53,15 @@ function applyNormalize(
 }
 
 /**
- * Write one document slot and run the descriptor's optional bundle-wide
- * `propagate` pass.  For coding this pushes the refreshed workplace codes
- * into every linked protocol on each edit (codes are the single source of
- * truth); for every other document it is a plain slot write.
+ * Write one document slot and optionally run the descriptor's bundle-wide
+ * `propagate` pass.  For coding, propagation refreshes workplace codes in
+ * every linked protocol (codes are the single source of truth).
+ *
+ * Propagation walks and rebuilds ALL dependent protocols, so it is gated by
+ * `propagate`: callers that only changed content which cannot affect codes
+ * (e.g. typing a position name) pass `false` to skip the whole-bundle walk —
+ * the per-keystroke hot path. Structural edits (add / delete / move a row,
+ * change a section, toggle «количество» 0↔1) pass `true`.
  */
 function writeSlot(
   documents: DocumentsData,
@@ -65,9 +70,10 @@ function writeSlot(
     propagate?: (docs: Record<string, Json>) => Record<string, Json>;
   },
   value: unknown,
+  propagate = true,
 ): DocumentsData {
   const next = { ...documents, [descriptor.key]: value as Json };
-  return descriptor.propagate
+  return descriptor.propagate && propagate
     ? (descriptor.propagate(next) as DocumentsData)
     : next;
 }
@@ -264,12 +270,17 @@ export function AttestationEditor({
 
   function handleFieldChange(next: unknown) {
     if (!descriptor) return;
-    // normalize on every change: for coding this performs the full positional
-    // renumbering (ids + codes) after any add / delete / move of rows or
-    // sections; writeSlot then propagates the refreshed codes into every
-    // linked protocol (coding is the single source of truth).
+    // normalize runs on every change (cheap, O(coding rows)): for coding it
+    // assigns row ids and recomputes positional codes after add / delete /
+    // move / count edits. It is identity-preserving, so it returns the SAME
+    // reference when nothing code-relevant changed — e.g. typing a position
+    // name. We use that to gate the expensive part: propagation (a full walk
+    // and rebuild of all 9 dependent protocols) runs ONLY when codes actually
+    // changed. Pure content edits — the per-keystroke hot path — skip it
+    // entirely, so typing no longer scales with the size of the whole bundle.
     const normalized = applyNormalize(descriptor, next);
-    onChange(writeSlot(documents, descriptor, normalized));
+    const codesChanged = normalized !== next;
+    onChange(writeSlot(documents, descriptor, normalized, codesChanged));
     setTouched(true);
     setStatus({ kind: "idle" });
   }
