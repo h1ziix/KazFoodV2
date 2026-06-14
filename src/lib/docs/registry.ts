@@ -233,6 +233,36 @@ export const DOCUMENT_REGISTRY: DocumentDescriptor<unknown>[] = [
     filename: (d) =>
       `Введение_${d.customer.name.replace(/[«»"\\/]+/g, "").trim()}.docx`,
   }),
+  describe<CodingProtocol>({
+    key: "coding",
+    label: "Кодировка",
+    templateUrl: "/templates/coding-protocol.docx",
+    schema: codingProtocolSchema as unknown as z.ZodType<CodingProtocol>,
+    example: codingExample,
+    buildContext: codingCtx,
+    filename: (d) =>
+      `Кодировка_${d.approval.organization.replace(/[«»"\\/]+/g, "")}.docx`,
+    // Stable row identity is internal — never shown or edited.
+    formSkipKeys: ["id"],
+    // Codes and section numbers are positional derived values: visible in
+    // the form but recomputed by `normalize` on every change.
+    formReadOnlyKeys: ["code", "number"],
+    normalize: normalizeCodingDocument,
+    // Coding is the single source of truth for workplace codes: every edit
+    // immediately refreshes the codes of linked rows in all protocols.
+    propagate: migrateWorkplaceCodes,
+  }),
+  describe<MeteoProtocol>({
+    key: "meteo",
+    label: "Микроклимат",
+    templateUrl: "/templates/meteo-protocol.docx",
+    schema: meteoProtocolSchema as unknown as z.ZodType<MeteoProtocol>,
+    example: meteoExample,
+    buildContext: meteoCtx,
+    filename: (d) => `Микроклимат_${d.protocol.number}.docx`,
+    // Hidden coding-row link used by sync; never edited by hand.
+    formSkipKeys: ["codingRowId"],
+  }),
   describe<LightingProtocol>({
     key: "lighting",
     label: "Освещенность",
@@ -276,6 +306,17 @@ export const DOCUMENT_REGISTRY: DocumentDescriptor<unknown>[] = [
       // Hidden coding-row link used by sync; never edited by hand.
       "codingRowId",
     ],
+  }),
+  describe<SummaryProtocol>({
+    key: "summary",
+    label: "Сводный протокол",
+    templateUrl: "/templates/summary-protocol.docx",
+    schema: summaryProtocolSchema as unknown as z.ZodType<SummaryProtocol>,
+    example: summaryExample,
+    buildContext: summaryCtx,
+    filename: (d) => `Сводный_протокол_${d.protocol.number}.docx`,
+    // Hidden coding-row link used by sync; never edited by hand.
+    formSkipKeys: ["codingRowId"],
   }),
   describe<HeavinessProtocol>({
     key: "heaviness",
@@ -326,28 +367,6 @@ export const DOCUMENT_REGISTRY: DocumentDescriptor<unknown>[] = [
     // Hidden coding-row link used by sync; never edited by hand.
     formSkipKeys: ["codingRowId"],
   }),
-  describe<MeteoProtocol>({
-    key: "meteo",
-    label: "Микроклимат",
-    templateUrl: "/templates/meteo-protocol.docx",
-    schema: meteoProtocolSchema as unknown as z.ZodType<MeteoProtocol>,
-    example: meteoExample,
-    buildContext: meteoCtx,
-    filename: (d) => `Микроклимат_${d.protocol.number}.docx`,
-    // Hidden coding-row link used by sync; never edited by hand.
-    formSkipKeys: ["codingRowId"],
-  }),
-  describe<SummaryProtocol>({
-    key: "summary",
-    label: "Сводный протокол",
-    templateUrl: "/templates/summary-protocol.docx",
-    schema: summaryProtocolSchema as unknown as z.ZodType<SummaryProtocol>,
-    example: summaryExample,
-    buildContext: summaryCtx,
-    filename: (d) => `Сводный_протокол_${d.protocol.number}.docx`,
-    // Hidden coding-row link used by sync; never edited by hand.
-    formSkipKeys: ["codingRowId"],
-  }),
   describe<ConclusionProtocol>({
     key: "conclusion",
     label: "Заключение",
@@ -356,25 +375,6 @@ export const DOCUMENT_REGISTRY: DocumentDescriptor<unknown>[] = [
     example: conclusionExample,
     buildContext: conclusionCtx,
     filename: (d) => `Заключение_${d.measurementDate.year}.docx`,
-  }),
-  describe<CodingProtocol>({
-    key: "coding",
-    label: "Кодировка",
-    templateUrl: "/templates/coding-protocol.docx",
-    schema: codingProtocolSchema as unknown as z.ZodType<CodingProtocol>,
-    example: codingExample,
-    buildContext: codingCtx,
-    filename: (d) =>
-      `Кодировка_${d.approval.organization.replace(/[«»"\\/]+/g, "")}.docx`,
-    // Stable row identity is internal — never shown or edited.
-    formSkipKeys: ["id"],
-    // Codes and section numbers are positional derived values: visible in
-    // the form but recomputed by `normalize` on every change.
-    formReadOnlyKeys: ["code", "number"],
-    normalize: normalizeCodingDocument,
-    // Coding is the single source of truth for workplace codes: every edit
-    // immediately refreshes the codes of linked rows in all protocols.
-    propagate: migrateWorkplaceCodes,
   }),
 ];
 
