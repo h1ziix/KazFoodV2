@@ -1,8 +1,9 @@
 /**
  * Инварианты схемы кодов рабочих мест и синхронизации:
  *
- *   1. Код — позиционный: "01" + раздел + строка, третий блок сбрасывается в
- *      каждом разделе; перенумерация полная и идемпотентная.
+ *   1. Код — позиционный: "01" + раздел + строка, третий блок СКВОЗНОЙ по
+ *      всему документу (не сбрасывается на новом разделе); перенумерация
+ *      полная и идемпотентная.
  *   2. Идентичность строки — скрытый id; при удалении/перемещении строк
  *      кодировки данные зависимых протоколов НЕ переезжают на соседей.
  *   3. Легаси-данные (без id) подхватываются по коду+имени и принимают id.
@@ -63,7 +64,7 @@ describe("formatWorkplaceCode", () => {
 });
 
 describe("normalizeCodingDocument", () => {
-  it("назначает id и позиционные коды; третий блок сбрасывается по разделам", () => {
+  it("назначает id и позиционные коды; третий блок СКВОЗНОЙ по разделам", () => {
     const doc = codingDoc([
       { title: "Раздел 1", rows: [{ name: "А" }, { name: "Б" }] },
       { title: "Раздел 2", rows: [{ name: "В" }] },
@@ -76,10 +77,33 @@ describe("normalizeCodingDocument", () => {
       "01 001 001",
       "01 001 002",
     ]);
-    expect(n.sections[1].rows[0].code).toBe("01 002 001");
+    // Третий блок продолжается с 003 — НЕ сбрасывается на новом разделе.
+    expect(n.sections[1].rows[0].code).toBe("01 002 003");
     for (const s of n.sections) {
       for (const r of s.rows) expect(r.id).toMatch(/\S/);
     }
+  });
+
+  it("третий блок СКВОЗНОЙ через много разделов и продолжается, не сбрасываясь", () => {
+    const n = normalizeCodingDocument(
+      codingDoc([
+        { title: "Р1", rows: [{ name: "А" }, { name: "Б" }, { name: "В" }] },
+        { title: "Р2", rows: [{ name: "Г" }, { name: "Д" }] },
+        { title: "Р3", rows: [{ name: "Е" }] },
+      ]),
+    ) as AnyObj;
+    expect(n.sections[0].rows.map((r: AnyObj) => r.code)).toEqual([
+      "01 001 001",
+      "01 001 002",
+      "01 001 003",
+    ]);
+    // Раздел 2: средний блок = 002, третий продолжается 004, 005.
+    expect(n.sections[1].rows.map((r: AnyObj) => r.code)).toEqual([
+      "01 002 004",
+      "01 002 005",
+    ]);
+    // Раздел 3: средний блок = 003, третий продолжается 006.
+    expect(n.sections[2].rows.map((r: AnyObj) => r.code)).toEqual(["01 003 006"]);
   });
 
   it("идемпотентна: повторный вызов возвращает ту же ссылку", () => {
@@ -787,20 +811,21 @@ describe("migrateWorkplaceCodes (бандл-миграция)", () => {
     const coding = migrated["coding"] as AnyObj;
     const safety = migrated["safety"] as AnyObj;
 
-    // Кодировка каноническая: 01 002 001 вместо легаси 01 005 031.
-    expect(coding.sections[1].rows[0].code).toBe("01 002 001");
+    // Кодировка каноническая со СКВОЗНЫМ третьим блоком: раздел 1 → 001, 002;
+    // раздел 2 продолжает счёт → 003 (вместо легаси 01 005 031).
+    expect(coding.sections[1].rows[0].code).toBe("01 002 003");
     expect(coding.sections[1].rows[0].id).toMatch(/\S/);
 
-    // Зависимые строки перешиты по старому коду (codingRowId), а код в
-    // травме — ПОСТРОЧНЫЙ номер её собственной таблицы: Бухгалтер —
-    // единственная строка своей секции → 001 (не базовый код кодировки 002).
+    // Зависимые строки перешиты по старому коду (codingRowId), а код в травме —
+    // ПОСТРОЧНЫЙ номер её собственной таблицы, тоже сквозной по разделам:
+    // Бухгалтер (раздел 1) → 001, Слесарь (раздел 2) продолжает счёт → 002.
     const buh = safety.sections[0].rows[0];
     expect(buh.code).toBe("01 001 001");
     expect(buh.codingRowId).toBe(coding.sections[0].rows[1].id);
     expect(buh.equipment).toBe("ПК БУХГАЛТЕРА");
 
     const slesar = safety.sections[1].rows[0];
-    expect(slesar.code).toBe("01 002 001");
+    expect(slesar.code).toBe("01 002 002");
     expect(slesar.codingRowId).toBe(coding.sections[1].rows[0].id);
     expect(slesar.equipment).toBe("ВЕРСТАК");
   });

@@ -735,6 +735,9 @@ function syncSafetyRows(data: unknown, sections: CodingSection[]): unknown {
   const d = data as Record<string, unknown>;
   const { byRow } = claimByIdentity(sections, extractFlatSectionRows(d));
 
+  // Сквозной счётчик строк по всем разделам (не сбрасывается с новым разделом —
+  // правило кода клиента 2026-06-15).
+  let rowNo = 0;
   const newSections = sections.map((section) => ({
     number: section.number,
     // Store the RAW section name (no "N. " prefix) — consistent with the
@@ -742,9 +745,9 @@ function syncSafetyRows(data: unknown, sections: CodingSection[]): unknown {
     // the number at render time, so the document is unchanged and there is no
     // double-numbering if a coding title ever contains a digit.
     title: section.title,
-    rows: section.rows.map((cr, i) => {
+    rows: section.rows.map((cr) => {
       // Построчный код перекрывает базовый код кодировки из linkFields.
-      const code = formatWorkplaceCode(section.number, i + 1);
+      const code = formatWorkplaceCode(section.number, ++rowNo);
       const ex = byRow.get(cr);
       return ex
         ? { ...ex, ...linkFields(cr), code, position: cr.name, count: cr.count }

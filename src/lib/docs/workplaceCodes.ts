@@ -5,14 +5,16 @@
  * │ A workplace code is a purely POSITIONAL, derived display value:             │
  * │                                                                             │
  * │   "01 SSS RRR"                                                              │
- * │    │   │   └── 1-based ROW position inside the section (resets per section) │
+ * │    │   │   └── 1-based ROW counter, CONTINUOUS across the whole document    │
+ * │    │   │       (does NOT reset per section: section 2 keeps counting on      │
+ * │    │   │        from where section 1 left off — client rule 2026-06-15)     │
  * │    │   └────── 1-based section position inside the coding document          │
  * │    └────────── constant prefix, never changes                               │
  * │                                                                             │
- * │ The third block is the plain row index — the «Количество» field NEVER       │
- * │ affects the code. Count is restricted to 0 | 1: repeated positions are      │
- * │ entered as SEPARATE rows, so two «Уборщик» rows naturally get e.g. 016      │
- * │ and 017 (distinct codes per physical workplace).                            │
+ * │ The third block is the plain running row index — the «Количество» field     │
+ * │ NEVER affects the code. Count is restricted to 0 | 1: repeated positions    │
+ * │ are entered as SEPARATE rows, so two «Уборщик» rows naturally get distinct  │
+ * │ consecutive codes (one continuous sequence for the whole document).         │
  * │                                                                             │
  * │ The code is recomputed from scratch on EVERY structural change (add /       │
  * │ delete / move row, add / delete section). It must never be treated as       │
@@ -33,7 +35,12 @@ function pad3(n: number): string {
   return String(n).padStart(3, "0");
 }
 
-/** "01 002 014" for section 2, row 14. Positions are 1-based. */
+/**
+ * "01 002 014" for section 2, running row 14. Positions are 1-based. `rowNo` is
+ * the CONTINUOUS counter across the whole document (it does not restart per
+ * section), so e.g. the first row of section 2 carries on from the last row of
+ * section 1.
+ */
 export function formatWorkplaceCode(sectionNo: number, rowNo: number): string {
   return `${WORKPLACE_CODE_PREFIX} ${pad3(sectionNo)} ${pad3(rowNo)}`;
 }
@@ -66,9 +73,9 @@ function rowId(row: Record<string, unknown>): string | undefined {
  * Bring a raw coding document into canonical form:
  *   - every row gets a stable `id` if it does not have one yet;
  *   - `section.number` is recomputed to the section's 1-based position;
- *   - every `row.code` is recomputed as the plain ROW INDEX inside its
- *     section (1-я строка = 001, 2-я = 002, …) — the «Количество» field
- *     never affects the code.
+ *   - every `row.code` is recomputed as a CONTINUOUS row counter across the
+ *     whole document (1-я аттестуемая строка = 001, и счёт НЕ сбрасывается с
+ *     новым разделом) — the «Количество» field never affects the code.
  *
  * Pure and idempotent. Unknown fields are preserved; malformed nodes are
  * passed through untouched (zod validation reports them, we never drop data).
@@ -79,6 +86,11 @@ export function normalizeCodingDocument(data: unknown): unknown {
   if (!isObj(data) || !Array.isArray(data.sections)) return data;
 
   let changed = false;
+  // Сквозной счётчик аттестуемых строк по ВСЕМУ документу: не сбрасывается на
+  // новом разделе (требование клиента 2026-06-15). Строки с количеством 0 («не
+  // аттестуется») счётчик не увеличивают и кода не получают (пустой), поэтому
+  // коды аттестуемых идут подряд без дыр.
+  let instance = 0;
   const sections = data.sections.map((s, si) => {
     if (!isObj(s)) return s;
     const number = si + 1;
@@ -86,10 +98,6 @@ export function normalizeCodingDocument(data: unknown): unknown {
     let rows = s.rows;
     if (Array.isArray(s.rows)) {
       let rowsChanged = false;
-      // Код = порядковый номер АТТЕСТУЕМОЙ строки в разделе. Строки с
-      // количеством 0 («не аттестуется») счётчик не увеличивают и кода не
-      // получают (пустой), поэтому коды аттестуемых идут подряд без дыр.
-      let instance = 0;
       const nextRows = s.rows.map((r) => {
         if (!isObj(r)) return r;
         const code = r.count === 0 ? "" : formatWorkplaceCode(number, ++instance);
@@ -174,6 +182,13 @@ export function migrateWorkplaceCodes(
   const maps: CodeMaps = { byId: new Map(), byOldCode: new Map() };
   let codingChanged = false;
 
+  // Same numbering as normalizeCodingDocument: ONE continuous counter for the
+  // whole document (does not reset per section). Only assessed rows
+  // (count !== 0) advance the counter and get a code. count = 0 rows are NOT
+  // propagation targets — dependent rows linked to a now-unassessed coding row
+  // keep their stale code until the explicit sync removes them (mirrors how a
+  // deleted coding row has no target).
+  let instance = 0;
   const sections = coding.sections.map((s, si) => {
     if (!isObj(s)) return s;
     const number = si + 1;
@@ -181,12 +196,6 @@ export function migrateWorkplaceCodes(
     let rows = s.rows;
     if (Array.isArray(s.rows)) {
       let rowsChanged = false;
-      // Same numbering as normalizeCodingDocument: only assessed rows
-      // (count !== 0) advance the counter and get a code. count = 0 rows are
-      // NOT propagation targets — dependent rows linked to a now-unassessed
-      // coding row keep their stale code until the explicit sync removes them
-      // (mirrors how a deleted coding row has no target).
-      let instance = 0;
       const nextRows = s.rows.map((r) => {
         if (!isObj(r)) return r;
         const assessed = r.count !== 0;
@@ -280,15 +289,17 @@ function remapNested(
 function remapSafetyRows(doc: unknown, maps: CodeMaps): unknown {
   if (!isObj(doc) || !Array.isArray(doc.sections)) return doc;
   let changed = false;
+  // Continuous row counter across ALL safety sections (does not reset per
+  // section — same rule as coding). Only assessed rows (count !== 0) are
+  // numbered; an unassessed row that still lingers here (until the explicit
+  // sync prunes it) gets an empty code, so the column reads 001, 002, 003…
+  // without gaps.
+  let instance = 0;
   const sections = doc.sections.map((sec, si) => {
     if (!isObj(sec) || !Array.isArray(sec.rows)) return sec;
     const sectionNo =
       typeof sec.number === "number" && sec.number >= 1 ? sec.number : si + 1;
     let secChanged = false;
-    // Only assessed rows (count !== 0) are numbered; an unassessed row that
-    // still lingers here (until the explicit sync prunes it) gets an empty
-    // code, so the visible column reads 001, 002, 003… without gaps.
-    let instance = 0;
     const rows = sec.rows.map((row) => {
       if (!isObj(row)) return row;
       const code =
