@@ -434,15 +434,15 @@ function syncMeasurementPlaces(
         let built: Record<string, unknown>;
         if (sameWorkplace) {
           // Repetition of an existing workplace → full clone incl. measured.
-          built = buildRow(key, sameWorkplace, 0, code, cr.name, true);
+          built = buildRow(key, sameWorkplace, 0, code, cr.name, true, section.number);
         } else if (sectionTemplate) {
           // Position new to a populated section → inherit the first row of
           // THIS section, including its measured reading (positions in one
           // section share the same category/conditions, e.g. all АУП = А-1).
-          built = buildRow(key, sectionTemplate, 0, code, cr.name, true);
+          built = buildRow(key, sectionTemplate, 0, code, cr.name, true, section.number);
         } else {
           // Empty section → blank default, nothing to inherit from.
-          built = buildRow(key, undefined, 0, code, cr.name, false);
+          built = buildRow(key, undefined, 0, code, cr.name, false, section.number);
         }
         // The id must always be stamped explicitly: templates are clones of
         // OTHER rows and would otherwise leak their own codingRowId.
@@ -487,6 +487,7 @@ function defaultMeasurement(
   key: string,
   rowNumber: number,
   placeName: string,
+  sectionNumber: number,
 ): Record<string, unknown> {
   const pointNumber = `${rowNumber}т`;
   switch (key) {
@@ -497,7 +498,7 @@ function defaultMeasurement(
     case "emp":
       return defaultEmpMeasurement(rowNumber, pointNumber, placeName);
     case "meteo":
-      return defaultMeteoMeasurement(rowNumber, pointNumber, placeName);
+      return defaultMeteoMeasurement(rowNumber, pointNumber, placeName, sectionNumber);
     default:
       return { rowNumber, pointNumber, place: placeName };
   }
@@ -524,11 +525,12 @@ function buildRow(
   code: string,
   placeName: string,
   inheritMeasured: boolean,
+  sectionNumber: number,
 ): Record<string, unknown> {
   const pointNumber = `${rowNumber}т`;
 
   if (!template) {
-    return { ...defaultMeasurement(key, rowNumber, placeName), code };
+    return { ...defaultMeasurement(key, rowNumber, placeName, sectionNumber), code };
   }
 
   switch (key) {
@@ -650,24 +652,50 @@ function defaultEmpMeasurement(
   };
 }
 
+/** Целое в римскую запись (1→I, 2→II, 3→III, 4→IV, …). */
+function toRoman(n: number): string {
+  if (!Number.isInteger(n) || n < 1) return "I";
+  const map: [number, string][] = [
+    [1000, "M"], [900, "CM"], [500, "D"], [400, "CD"], [100, "C"],
+    [90, "XC"], [50, "L"], [40, "XL"], [10, "X"], [9, "IX"],
+    [5, "V"], [4, "IV"], [1, "I"],
+  ];
+  let out = "";
+  let rest = n;
+  for (const [v, s] of map) {
+    while (rest >= v) {
+      out += s;
+      rest -= v;
+    }
+  }
+  return out;
+}
+
 function defaultMeteoMeasurement(
   rowNumber: number,
   pointNumber: string,
   place: string,
+  sectionNumber: number,
 ): Record<string, unknown> {
   return {
     rowNumber,
     pointNumber,
     place,
-    workCategory: "",
+    // Категория работ нумеруется по разделу: раздел 1 → «Iб», 2 → «IIб»,
+    // 3 → «IIIб», 4 → «IVб» (римский номер раздела + «б»). Заполняется
+    // обязательно — пустое значение не проходит валидацию (workCategory
+    // nonEmpty), из-за чего новые разделы раньше «не выходили».
+    workCategory: `${toRoman(sectionNumber)}б`,
     timeOfDay: "день",
+    // Измеренные значения вписывает пользователь — оставляем пустыми.
     tempMeasured: "",
-    tempAllowed: "",
+    tempAllowed: "16-27",
     humidityMeasured: "",
-    humidityAllowed: "",
+    humidityAllowed: "70",
+    // Скорость воздуха пока не трогаем (по умолчанию прочерк).
     airSpeedMeasured: "-",
     airSpeedAllowed: "-",
-    pressure: "",
+    pressure: "694",
   };
 }
 
