@@ -855,16 +855,27 @@ function syncSummaryPlaces(data: unknown, sections: CodingSection[]): unknown {
  */
 
 /**
- * A card counts as "filled" once it has a non-empty final assessment.
- * Auto-created blank cards (finalAssessment "") — e.g. from a brand-new
- * section synced before the uniform-norm rule — are re-filled with the
- * universal norm on the next sync; genuinely filled cards are preserved.
+ * A card counts as "filled" (and is therefore preserved on sync) only when it
+ * carries real normative content — i.e. at least one indicator with a non-empty
+ * `value`. The indicators ARE the norm; everything else (finalAssessment,
+ * classes) can be present on an otherwise empty card.
+ *
+ * Checking `finalAssessment` alone was a bug: legacy cards auto-created by the
+ * old `defaultHeaviness`/`firstCardBySection` codepath had a final assessment
+ * but EMPTY indicator values. Those were wrongly treated as "filled" and never
+ * refilled with the universal norm — the client saw cards «без нормы» that
+ * survived every sync. Judging by the indicator values fixes that: such cards
+ * are now refilled, while genuinely user-filled cards (which always have
+ * indicator values) are preserved verbatim.
  */
 function hasNormContent(card: Record<string, unknown>): boolean {
-  return (
-    typeof card.finalAssessment === "string" &&
-    card.finalAssessment.trim() !== ""
-  );
+  for (const v of Object.values(card)) {
+    if (isObj(v)) {
+      const value = (v as Record<string, unknown>).value;
+      if (typeof value === "string" && value.trim() !== "") return true;
+    }
+  }
+  return false;
 }
 
 /**
