@@ -509,7 +509,7 @@ const edits = [];
   const replaced = replaceParagraphValue(
     xml,
     " {customer.name}, {customer.address}",
-    { keepLeadingUntilText: /:$/ },
+    { keepLeadingUntilText: /:\s*$/ },
   );
   edits.push({ start: c.start, end: c.end, replacement: replaced });
 }
@@ -519,7 +519,7 @@ const edits = [];
   const c = blockChildren[7];
   const xml = blockXml.substring(c.start, c.end);
   const replaced = replaceParagraphValue(xml, " {measurementPlace}", {
-    keepLeadingUntilText: /:$/,
+    keepLeadingUntilText: /:\s*$/,
   });
   edits.push({ start: c.start, end: c.end, replacement: replaced });
 }
@@ -529,7 +529,7 @@ const edits = [];
   const c = blockChildren[8];
   const xml = blockXml.substring(c.start, c.end);
   const replaced = replaceParagraphValue(xml, " {position}", {
-    keepLeadingUntilText: /:$/,
+    keepLeadingUntilText: /:\s*$/,
   });
   edits.push({ start: c.start, end: c.end, replacement: replaced });
 }
@@ -541,7 +541,7 @@ const edits = [];
   const replaced = replaceParagraphValue(
     xml,
     " «{measurementDate.day}» {measurementDate.month} {measurementDate.year} г.",
-    { keepLeadingUntilText: /:$/ },
+    { keepLeadingUntilText: /:\s*$/ },
   );
   edits.push({ start: c.start, end: c.end, replacement: replaced });
 }
