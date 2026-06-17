@@ -11,6 +11,7 @@ import {
 import { flatten } from "./docs/flatten";
 import { expandIndicator } from "./docs/indicators";
 import { restartListNumberingPerLoop } from "./docs/numberingRestart";
+import { formatProtocolNumber } from "./docs/protocolNumber";
 
 const TEMPLATE_URL = "/templates/heaviness-protocol.docx";
 
@@ -62,9 +63,14 @@ export function buildTemplateContext(
   });
   return {
     ...rootFlat,
-    workplaces: data.workplaces.map((w) => ({
+    // Номер протокола «ПРОТОКОЛ № …» нумеруется по порядку, своя
+    // последовательность на документ: позиция места в массиве → 001, 002, …
+    // (см. formatProtocolNumber, как в напряжённости). Перекрывает ручной
+    // protocol.number из rootFlat — тот теперь влияет только на имя файла.
+    workplaces: data.workplaces.map((w, idx) => ({
       ...rootFlat,
       ...mapWorkplace(w),
+      "protocol.number": formatProtocolNumber(idx + 1),
     })),
   };
 }

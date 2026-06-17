@@ -532,14 +532,15 @@ const edits = [];
 {
   const c = blockChildren[2];
   const xml = blockXml.substring(c.start, c.end);
-  // Replace the SEQ field's separated text "1" — keep the literal " 0"
-  // prefix and the rest of the field structure intact?  Simpler: replace
-  // EVERYTHING after the literal "№" with " {protocol.number}-{rowNumber}".
-  // To keep formatting (italic / Times New Roman / bCs), we keep the runs
-  // up to and including the run that emits "№", then drop the rest.
+  // Replace the SEQ field's separated text "1" — keep the literal "№" prefix
+  // and drop the rest, emitting just " {protocol.number}". The number is an
+  // auto-sequential value per workplace (001, 002, …), filled in
+  // buildTemplateContext via formatProtocolNumber — same scheme as tension.
+  // To keep formatting (italic / Times New Roman / bCs), we keep the runs up
+  // to and including the run that emits "№", then drop the rest.
   const replaced = replaceParagraphValue(
     xml,
-    " {protocol.number}-{rowNumber}",
+    " {protocol.number}",
     { keepLeadingUntilText: /№$/ },
   );
   edits.push({ start: c.start, end: c.end, replacement: replaced });

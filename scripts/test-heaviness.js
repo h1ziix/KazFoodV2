@@ -139,11 +139,15 @@ function run() {
     performer: example.performer,
     representative: example.representative,
   });
+  // Mirror src/lib/docs/protocolNumber.ts (formatProtocolNumber): one
+  // leading zero + the number padded to >=2 digits → 001, 010, 0100.
+  const fmtProtocolNumber = (seq) => "0" + String(seq).padStart(2, "0");
   const context = {
     ...rootFlat,
-    workplaces: example.workplaces.map((w) => ({
+    workplaces: example.workplaces.map((w, idx) => ({
       ...rootFlat,
       ...mapWorkplace(w),
+      "protocol.number": fmtProtocolNumber(idx + 1),
     })),
   };
   try {
