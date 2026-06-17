@@ -718,10 +718,81 @@ const edits = [];
 }
 
 // ---- Signature paragraphs ----
+//  child[18] "Өлшеуді жүргізген  ...  Зертхана маманы" → align KZ title to the
+//            signature column (tab) so it lines up with the rest of the column
 //  child[19] "Оценку проводил:  ...  Специалист лаборатории" → keep label, replace name part with {performer.position}
-//  child[20] "...Исаева А.В...." → {performer.fullName}
+//  child[20] "...Исаева А.В...." → {performer.fullName}, aligned to signature column
 //  child[24] "Инженер по БиОТ" → {representative.position}
 //  child[25] MERGEFIELD Богачев А.И. → {representative.fullName}
+
+// Signature-column alignment (added 2026-06-15, client «выровняй подписи»):
+// the reference pushes the right-hand signature column with fragile runs of
+// literal spaces, so the performer title/name do NOT line up with the
+// representative block (which uses a real indent left=4956 + firstLine=708 =
+// 5664 tw). We normalise the whole right column to that SAME 5664-tw position:
+// standalone lines get the indent, lines sharing a row with a left label get a
+// left tab stop at 5664 and a tab in place of the spaces.
+const SIGN_COL_TWIPS = 5664;
+
+/** Insert/replace <w:ind w:left=.. w:firstLine=..> in a pPr string (ind comes
+ *  after spacing, before rPr, in CT_PPr order). */
+function setIndent(pPr, left, firstLine) {
+  const ind = `<w:ind w:left="${left}" w:firstLine="${firstLine}"/>`;
+  if (!pPr) return `<w:pPr>${ind}</w:pPr>`;
+  const body = pPr.replace(/<w:ind\b[^>]*\/>/, "");
+  if (/<w:rPr>/.test(body)) return body.replace("<w:rPr>", ind + "<w:rPr>");
+  return body.replace("</w:pPr>", ind + "</w:pPr>");
+}
+
+/** Insert/replace a single left tab stop at pos (tabs precede spacing in
+ *  CT_PPr order, so it is safe to put right after the <w:pPr> open tag). */
+function setLeftTab(pPr, pos) {
+  const tabs = `<w:tabs><w:tab w:val="left" w:pos="${pos}"/></w:tabs>`;
+  if (!pPr) return `<w:pPr>${tabs}</w:pPr>`;
+  return pPr.replace(/<w:tabs>[\s\S]*?<\/w:tabs>/, "").replace("<w:pPr>", "<w:pPr>" + tabs);
+}
+
+/** Replace the whitespace-only run(s) between a left label and the right-hand
+ *  text with a single tab, and add a left tab stop at `pos`. */
+function alignRightWithTab(paragraphXml, pos) {
+  const openTagEnd = paragraphXml.indexOf(">") + 1;
+  const openTag = paragraphXml.substring(0, openTagEnd);
+  const inner = paragraphXml.substring(openTagEnd, paragraphXml.length - "</w:p>".length);
+  let pPr = "";
+  let body = inner;
+  const pPrMatch = inner.match(/^\s*<w:pPr>[\s\S]*?<\/w:pPr>/);
+  if (pPrMatch) { pPr = pPrMatch[0]; body = inner.substring(pPrMatch[0].length); }
+  pPr = setLeftTab(pPr, pos);
+  let tabInserted = false;
+  const out = tokenizeRuns(body).flatMap((t) => {
+    if (t.kind === "r") {
+      const vis = extractVisibleText(t.xml);
+      if (vis !== "" && /^\s+$/.test(vis)) {
+        if (tabInserted) return [];
+        tabInserted = true;
+        return ["<w:r><w:tab/></w:r>"];
+      }
+    }
+    return [t.xml];
+  });
+  return openTag + pPr + out.join("") + "</w:p>";
+}
+
+// child[18]: align "Зертхана маманы" to the signature column via a left tab.
+{
+  const c = blockChildren[18];
+  const xml = blockXml.substring(c.start, c.end);
+  if (!xml.includes("Зертхана")) {
+    throw new Error(
+      `child[18] is not the «Зертхана маманы» signature line — refusing to edit (got: ${xml.replace(/<[^>]+>/g, "").slice(0, 60)})`,
+    );
+  }
+  edits.push({
+    start: c.start,
+    end: c.end,
+    replacement: alignRightWithTab(xml, SIGN_COL_TWIPS),
+  });
+}
 
 // child[19]: keep "Оценку проводил:" + indentation, replace "Специалист лаборатории" portion
 {
@@ -760,26 +831,24 @@ const edits = [];
       pPr = pPrMatch[0];
       body = inner.substring(pPrMatch[0].length);
     }
+    // Align the performer name to the SAME signature column as the
+    // representative block (ind left=4956 firstLine=708 = 5664 tw) instead of a
+    // fragile leading-space run, so «Исаева А.В.» lines up under «Зертхана
+    // маманы» and over «Богачев А.И.». Drop the leading whitespace runs.
+    pPr = setIndent(pPr, 4956, 708);
     const tokens = tokenizeRuns(body);
-    // Find first run with non-whitespace text → that's the name; drop it
-    // and everything after.
-    let cutAt = tokens.length;
+    // rPr cloned from the run that carries the visible name.
     let nameRPr = "";
-    for (let i = 0; i < tokens.length; i++) {
-      if (tokens[i].kind !== "r") continue;
-      const t = extractVisibleText(tokens[i].xml);
-      if (/\S/.test(t)) {
-        cutAt = i;
-        const m = tokens[i].xml.match(/<w:rPr>[\s\S]*?<\/w:rPr>/);
+    for (const t of tokens) {
+      if (t.kind !== "r") continue;
+      if (/\S/.test(extractVisibleText(t.xml))) {
+        const m = t.xml.match(/<w:rPr>[\s\S]*?<\/w:rPr>/);
         if (m) nameRPr = m[0];
         break;
       }
     }
-    const kept = tokens.slice(0, cutAt);
     const placeholderRun = `<w:r>${nameRPr}<w:t xml:space="preserve">{performer.fullName}</w:t></w:r>`;
-    return (
-      openTag + pPr + kept.map((t) => t.xml).join("") + placeholderRun + "</w:p>"
-    );
+    return openTag + pPr + placeholderRun + "</w:p>";
   })();
   // Use the customised variant
   edits.push({ start: c.start, end: c.end, replacement: customised });

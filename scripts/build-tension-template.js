@@ -703,17 +703,78 @@ const edits = [];
 }
 
 // ---- Signature block ----
-// child[16]: "Өлшеуді жүргізген ... Зертхана маманы" — static (KZ), keep.
-// child[17]: "Оценку проводил:      <spaces>     Специалист лаборатории"
-//            → keep "Оценку проводил:" + whitespace runs, replace italic
-//            position part with {performer.position}.
+// Signature-column alignment (added 2026-06-15, client «выровняй подписи»):
+// the reference positions the right-hand signature column with fragile runs of
+// literal spaces (Зертхана маманы, {performer.position}, {performer.fullName}),
+// so they don't line up with the representative block, which uses a real indent
+// left=4956 + firstLine=708 = 5664 tw. We normalise the whole right column to
+// that same 5664-tw position: standalone lines get the indent, lines sharing a
+// row with a left label get a left tab stop at 5664 and a tab for the spaces.
+const SIGN_COL_TWIPS = 5664;
+
+/** Insert/replace <w:ind w:left=.. w:firstLine=..> in a pPr (ind comes after
+ *  spacing, before rPr, in CT_PPr order). */
+function setIndent(pPr, left, firstLine) {
+  const ind = `<w:ind w:left="${left}" w:firstLine="${firstLine}"/>`;
+  if (!pPr) return `<w:pPr>${ind}</w:pPr>`;
+  const body = pPr.replace(/<w:ind\b[^>]*\/>/, "");
+  if (/<w:rPr>/.test(body)) return body.replace("<w:rPr>", ind + "<w:rPr>");
+  return body.replace("</w:pPr>", ind + "</w:pPr>");
+}
+
+/** Insert/replace a single left tab stop at pos (tabs precede spacing, so it is
+ *  safe to put right after the <w:pPr> open tag). */
+function setLeftTab(pPr, pos) {
+  const tabs = `<w:tabs><w:tab w:val="left" w:pos="${pos}"/></w:tabs>`;
+  if (!pPr) return `<w:pPr>${tabs}</w:pPr>`;
+  return pPr.replace(/<w:tabs>[\s\S]*?<\/w:tabs>/, "").replace("<w:pPr>", "<w:pPr>" + tabs);
+}
+
+/** Replace the whitespace-only run(s) separating a left label from the
+ *  right-hand text with a single tab, and add a left tab stop at `pos`. */
+function alignRightWithTab(paragraphXml, pos) {
+  const openTagEnd = paragraphXml.indexOf(">") + 1;
+  const openTag = paragraphXml.substring(0, openTagEnd);
+  const inner = paragraphXml.substring(openTagEnd, paragraphXml.length - "</w:p>".length);
+  let pPr = "";
+  let body = inner;
+  const pPrMatch = inner.match(/^\s*<w:pPr>[\s\S]*?<\/w:pPr>/);
+  if (pPrMatch) { pPr = pPrMatch[0]; body = inner.substring(pPrMatch[0].length); }
+  pPr = setLeftTab(pPr, pos);
+  let tabInserted = false;
+  const out = tokenizeRuns(body).flatMap((t) => {
+    if (t.kind === "r") {
+      const vis = extractVisibleText(t.xml);
+      if (vis !== "" && /^\s+$/.test(vis)) {
+        if (tabInserted) return [];
+        tabInserted = true;
+        return ["<w:r><w:tab/></w:r>"];
+      }
+    }
+    return [t.xml];
+  });
+  return openTag + pPr + out.join("") + "</w:p>";
+}
+
+// child[16]: "Өлшеуді жүргізген ... Зертхана маманы" — align KZ title to the
+// signature column (5664 tw) via a left tab instead of fragile spaces.
+{
+  const c = blockChildren[16];
+  const xml = blockXml.substring(c.start, c.end);
+  if (!xml.includes("Зертхана")) {
+    throw new Error(
+      `child[16] is not the «Зертхана маманы» signature line — refusing to edit (got: ${xml.replace(/<[^>]+>/g, "").slice(0, 60)})`,
+    );
+  }
+  edits.push({ start: c.start, end: c.end, replacement: alignRightWithTab(xml, SIGN_COL_TWIPS) });
+}
+
+// child[17]: "Оценку проводил:  <spaces>  {performer.position}" → keep the
+// label, drop the spaces, put {performer.position} at the signature column via
+// a left tab so it lines up with the rest of the right column.
 {
   const c = blockChildren[17];
   const xml = blockXml.substring(c.start, c.end);
-  // The italic position part begins after ALL whitespace runs.  Use a
-  // custom walk: keep runs until we hit a non-whitespace italic run that
-  // is NOT the "Оценку проводил:" label (i.e., the second non-whitespace
-  // run that starts the position name).
   const customised = (function () {
     const openTagEnd = xml.indexOf(">") + 1;
     const openTag = xml.substring(0, openTagEnd);
@@ -726,36 +787,31 @@ const edits = [];
       body = inner.substring(pPrMatch[0].length);
     }
     const tokens = tokenizeRuns(body);
-    // Walk runs; accumulate visible text; cut at the run that starts the
-    // position text — i.e. once accumulated text matches "Оценку проводил:"
-    // followed by spaces and then any non-whitespace.
+    // Keep runs up to and including the run that holds the "Оценку проводил:"
+    // label (the colon), then a tab to the signature column, then the position.
     let accumulated = "";
-    let cutAt = tokens.length;
-    let positionRPr = "";
-    let seenColon = false;
+    let colonIdx = -1;
     for (let i = 0; i < tokens.length; i++) {
       if (tokens[i].kind !== "r") continue;
-      const t = extractVisibleText(tokens[i].xml);
-      const before = accumulated;
-      accumulated += t;
-      if (!seenColon) {
-        if (/:/.test(accumulated)) seenColon = true;
-        continue;
-      }
-      // seenColon: skip whitespace-only runs; first non-whitespace run is position
-      if (/\S/.test(t) && /\S/.test(accumulated.slice(before.length))) {
-        cutAt = i;
+      accumulated += extractVisibleText(tokens[i].xml);
+      if (/:/.test(accumulated)) { colonIdx = i; break; }
+    }
+    let positionRPr = "";
+    for (let i = colonIdx + 1; i < tokens.length; i++) {
+      if (tokens[i].kind !== "r") continue;
+      if (/\S/.test(extractVisibleText(tokens[i].xml))) {
         const m = tokens[i].xml.match(/<w:rPr>[\s\S]*?<\/w:rPr>/);
         if (m) positionRPr = m[0];
         break;
       }
     }
-    const kept = tokens.slice(0, cutAt);
+    const kept = tokens.slice(0, colonIdx + 1).map((t) => t.xml).join("");
     const placeholderRun = `<w:r>${positionRPr}<w:t xml:space="preserve">{performer.position}</w:t></w:r>`;
     return (
       openTag +
-      pPr +
-      kept.map((t) => t.xml).join("") +
+      setLeftTab(pPr, SIGN_COL_TWIPS) +
+      kept +
+      "<w:r><w:tab/></w:r>" +
       placeholderRun +
       "</w:p>"
     );
@@ -763,8 +819,9 @@ const edits = [];
   edits.push({ start: c.start, end: c.end, replacement: customised });
 }
 
-// child[18]: "<spaces>Исаева А.В.<spaces>" — replace name, preserve leading
-// whitespace runs so the visual indentation is identical.
+// child[18]: "<spaces>Исаева А.В.<spaces>" → align the name to the signature
+// column (ind left=4956 firstLine=708 = 5664 tw, same as the representative
+// block) instead of a fragile leading-space run, and drop the spaces.
 {
   const c = blockChildren[18];
   const xml = blockXml.substring(c.start, c.end);
@@ -779,33 +836,16 @@ const edits = [];
       pPr = pPrMatch[0];
       body = inner.substring(pPrMatch[0].length);
     }
-    const tokens = tokenizeRuns(body);
-    // In the reference this paragraph has ONE run containing
-    // "<many spaces>Исаева А.В." followed by another run of trailing
-    // spaces.  We must preserve the leading spaces visually.  Strategy:
-    //   - Take rPr from the first text run (carries the font).
-    //   - Extract the leading whitespace from the first run's text and
-    //     emit it as its own pure-whitespace run, then the placeholder
-    //     run with the same rPr.
     let nameRPr = "";
-    let leadingSpaces = "";
-    const firstTextRunIdx = tokens.findIndex(
-      (t) => t.kind === "r" && /<w:t[\s>]/.test(t.xml),
-    );
-    if (firstTextRunIdx >= 0) {
-      const firstRun = tokens[firstTextRunIdx];
-      const m = firstRun.xml.match(/<w:rPr>[\s\S]*?<\/w:rPr>/);
-      if (m) nameRPr = m[0];
-      // Extract concatenated text of the first run
-      const visible = extractVisibleText(firstRun.xml);
-      const ws = visible.match(/^\s*/);
-      leadingSpaces = ws ? ws[0] : "";
+    for (const t of tokenizeRuns(body)) {
+      if (t.kind === "r" && /\S/.test(extractVisibleText(t.xml))) {
+        const m = t.xml.match(/<w:rPr>[\s\S]*?<\/w:rPr>/);
+        if (m) nameRPr = m[0];
+        break;
+      }
     }
-    const spacesRun = leadingSpaces
-      ? `<w:r>${nameRPr}<w:t xml:space="preserve">${leadingSpaces}</w:t></w:r>`
-      : "";
     const placeholderRun = `<w:r>${nameRPr}<w:t xml:space="preserve">{performer.fullName}</w:t></w:r>`;
-    return openTag + pPr + spacesRun + placeholderRun + "</w:p>";
+    return openTag + setIndent(pPr, 4956, 708) + placeholderRun + "</w:p>";
   })();
   edits.push({ start: c.start, end: c.end, replacement: customised });
 }
