@@ -1,15 +1,19 @@
 import { z } from "zod";
 
 const nonEmpty = z.string().min(1, "не должно быть пустым");
+const optStr = z.string();
 
 const rangeSchema = z.object({
   name: nonEmpty,
   distance: nonEmpty,
   height: nonEmpty,
   time: nonEmpty,
-  electricMeasured: nonEmpty,
+  // Измеренные значения вписывает пользователь после синхронизации, поэтому при
+  // синке они пустые — иначе новый раздел не проходил бы валидацию (как было до
+  // правок в meteo/lighting). Нормативные «допустимые» остаются обязательными.
+  electricMeasured: optStr,
   electricAllowed: nonEmpty,
-  magneticMeasured: nonEmpty,
+  magneticMeasured: optStr,
   magneticAllowed: nonEmpty,
 });
 

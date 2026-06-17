@@ -43,7 +43,10 @@ const measurementSchema = z.object({
   // Hidden in the form UI; user fills these directly in the DOCX.
   octaves: octaveSchema,
   character: characterSchema,
-  measured: nonEmpty,
+  // Измеренное значение вписывает пользователь после синхронизации, поэтому при
+  // синке оно пустое — иначе новый раздел не проходил бы валидацию (как было до
+  // правок в meteo/lighting). Нормативное «допустимое» остаётся обязательным.
+  measured: optStr,
   allowed: nonEmpty,
 });
 
