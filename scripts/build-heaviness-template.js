@@ -554,10 +554,18 @@ const edits = [];
 {
   const c = blockChildren[6];
   const xml = blockXml.substring(c.start, c.end);
+  // Значение заказчика (наименование + адрес) подчёркиваем чёрным одинарным
+  // подчёркиванием, как остальные заполняемые поля (должность/дата). В исходном
+  // DOCX у этого рана <w:u> не было. valueRPr = исходный rPr значения +
+  // <w:u w:val="single"/> (порядок CT_RPr: color → u → lang).
   const replaced = replaceParagraphValue(
     xml,
     " {customer.name}, {customer.address}",
-    { keepLeadingUntilText: /:$/ },
+    {
+      keepLeadingUntilText: /:$/,
+      valueRPr:
+        '<w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="Times New Roman" w:hAnsi="Times New Roman"/><w:b/><w:color w:val="000000"/><w:u w:val="single"/><w:lang w:val="kk-KZ" w:eastAsia="ru-RU"/></w:rPr>',
+    },
   );
   edits.push({ start: c.start, end: c.end, replacement: replaced });
 }
