@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|Create",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node -e \"\nconst fs = require('fs');\nconst path = require('path');\nconst keys = ['lighting','emp','noise','heaviness','tension','safety','siz','meteo','summary','conclusion','coding'];\nconst missing = [];\nkeys.forEach(k => {\n  const tpl = path.join('public','templates', k+'-protocol.docx');\n  if (!fs.existsSync(tpl)) missing.push(tpl);\n});\nif (missing.length) {\n  console.error('HOOK WARNING: missing templates:', missing.join(', '));\n} else {\n  console.log('HOOK OK: all 11 templates present');\n}\n\""
+          }
+        ]
+      }
+    ]
+  }
+}
