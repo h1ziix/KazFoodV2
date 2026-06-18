@@ -1,6 +1,5 @@
 import { z } from "zod";
-
-const nonEmpty = z.string().min(1, "не должно быть пустым");
+import { nonEmpty } from "@/lib/docs/zod-helpers";
 
 const measurementSchema = z.object({
   // Stable coding-row id — primary sync key; hidden in the form. Defaulted so
@@ -66,14 +65,5 @@ export const lightingProtocolSchema = z.object({
 
 export type LightingProtocolParsed = z.infer<typeof lightingProtocolSchema>;
 
-export interface ValidationIssue {
-  path: string;
-  message: string;
-}
-
-export function formatZodIssues(error: z.ZodError): ValidationIssue[] {
-  return error.issues.map((issue) => ({
-    path: issue.path.join("."),
-    message: issue.message,
-  }));
-}
+// ValidationIssue / formatZodIssues живут в @/lib/docs/zod-helpers — единый
+// источник. Раньше они дублировались здесь (техдолг из CLAUDE.md).

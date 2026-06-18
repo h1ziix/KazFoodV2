@@ -1,6 +1,5 @@
 import { z } from "zod";
-
-const nonEmpty = z.string().min(1, "не должно быть пустым");
+import { nonEmpty } from "@/lib/docs/zod-helpers";
 
 const rowSchema = z.object({
   // Стабильный id строки кодировки — первичный ключ синхронизации; скрыт из

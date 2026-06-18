@@ -1,4 +1,4 @@
-import type { ValidationIssue } from "@/lib/lightingSchema";
+import type { ValidationIssue } from "@/lib/docs/zod-helpers";
 
 interface Props {
   title: string;

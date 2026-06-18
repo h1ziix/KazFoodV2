@@ -1,7 +1,5 @@
 import { z } from "zod";
-
-const nonEmpty = z.string().min(1, "не должно быть пустым");
-const optStr = z.string();
+import { nonEmpty, optStr } from "@/lib/docs/zod-helpers";
 
 const octaveSchema = z.object({
   hz31: optStr,

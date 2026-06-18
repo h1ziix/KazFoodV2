@@ -1,7 +1,5 @@
 import { z } from "zod";
-
-const nonEmpty = z.string().min(1, "не должно быть пустым");
-const optStr = z.string();
+import { nonEmpty, optStr } from "@/lib/docs/zod-helpers";
 
 const classSchema = z.enum(["", "2", "3.1", "3.2", "3.3", "3.4", "4"], {
   errorMap: () => ({

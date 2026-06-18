@@ -1,6 +1,5 @@
 import { z } from "zod";
-
-const nonEmpty = z.string().min(1, "не должно быть пустым");
+import { nonEmpty } from "@/lib/docs/zod-helpers";
 
 const heavinessClassSchema = z.enum(["1", "2", "3.1", "3.2"]);
 

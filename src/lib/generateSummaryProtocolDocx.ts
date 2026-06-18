@@ -2,6 +2,7 @@ import type { SummaryFactor, SummaryProtocol } from "@/types/summary";
 import { renderDocument, TemplateRenderError } from "./docs/engine";
 import { flatten } from "./docs/flatten";
 import { flattenWorkplaceFactors } from "./docs/rows";
+import { expandClassCount } from "./docs/indicators";
 
 const TEMPLATE_URL = "/templates/summary-protocol.docx";
 
@@ -55,47 +56,30 @@ export function buildTemplateContext(
 }
 
 /**
+ * Суффиксы шести классовых колонок сводного — РОВНО как в шаблоне
+ * (class2…class4), а не дефолтные c2…c4 из indicators.ts.
+ */
+const SUMMARY_CLASS_SUFFIXES = {
+  "2": "class2",
+  "3.1": "class31",
+  "3.2": "class32",
+  "3.3": "class33",
+  "3.4": "class34",
+  "4": "class4",
+} as const;
+
+/**
  * Map a factor's `classValue` into the appropriate one of the six class
  * cells, leaving the others blank. The rendered cell content is "X кл"
  * (matches the source DOCX wording).
  */
 function factorCells(factor: SummaryFactor): Record<string, string> {
-  const cells: Record<string, string> = {
+  const display = factor.classValue ? `${factor.classValue} кл` : "";
+  return {
     factorName: factor.name,
     factorMethod: factor.method,
     factorNorm: factor.norm,
     factorActual: factor.actual,
-    class2: "",
-    class31: "",
-    class32: "",
-    class33: "",
-    class34: "",
-    class4: "",
+    ...expandClassCount("", factor.classValue, display, SUMMARY_CLASS_SUFFIXES),
   };
-  const display = factor.classValue ? `${factor.classValue} кл` : "";
-  switch (factor.classValue) {
-    case "2":
-      cells.class2 = display;
-      break;
-    case "3.1":
-      cells.class31 = display;
-      break;
-    case "3.2":
-      cells.class32 = display;
-      break;
-    case "3.3":
-      cells.class33 = display;
-      break;
-    case "3.4":
-      cells.class34 = display;
-      break;
-    case "4":
-      cells.class4 = display;
-      break;
-    case "":
-    default:
-      // No class assigned; leave all cells blank.
-      break;
-  }
-  return cells;
 }

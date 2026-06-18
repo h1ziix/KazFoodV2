@@ -150,10 +150,15 @@ public/
 
 ## Известный технический долг (не трогать без задачи)
 
-- 10 схем из 11 имеют локальный `const nonEmpty` вместо импорта из `zod-helpers`
-- `page.tsx` и `ValidationErrors.tsx` импортируют `ValidationIssue`/`formatZodIssues` из `lightingSchema` (не из `zod-helpers`)
-- `generateSummaryProtocolDocx.ts` имеет inline `switch` для class-cell вместо `expandClassCount`
-- Нет автоматических тестов (`test-generation.mjs` — ручной скрипт, не через `engine.ts`)
+Исправлено 2026-06-17 (аудит):
+- ~~Локальный `const nonEmpty` в схемах~~ → все схемы импортируют `nonEmpty`/`optStr` из `zod-helpers`.
+- ~~`ValidationErrors.tsx` импортирует `ValidationIssue` из `lightingSchema`~~ → теперь из `zod-helpers`; дубликат `ValidationIssue`/`formatZodIssues` в `lightingSchema.ts` удалён. (`page.tsx` больше не существует — UI на `AttestationEditor`, который уже брал `formatZodIssues` из `zod-helpers`.)
+- ~~inline `switch` в `generateSummaryProtocolDocx.ts`~~ → заменён на `expandClassCount` (с маппингом суффиксов `class2…class4`).
+
+Осталось:
+- Есть Vitest (`npm test`), но покрыта в основном логика синхронизации/кодов/валидации; рендер DOCX проверяется отдельными ручными скриптами `scripts/test-*.js` (не через `engine.ts`).
+- Вторая группа дублей XML-хелперов: `build-coding-template.js` и `build-siz-template.js` (не вынесена в `scripts/lib/`).
+- `next lint` в этой версии Next не работает (проект на старом `.eslintrc`); линтер не запускается — полагаемся на `tsc` + Vitest.
 
 ---
 
