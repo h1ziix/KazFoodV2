@@ -32,10 +32,20 @@ export async function generateSummaryProtocolDocx(
  *     factor rows in the same workplace have those fields blank so the
  *     leading columns appear empty (matching the source DOCX layout).
  */
+/** Пустой фактор — для рабочего места без измерений: строка появляется в
+ *  таблице с заполненными колонками должности и пустыми колонками факторов. */
+const EMPTY_FACTOR: SummaryFactor = {
+  name: "",
+  method: "",
+  norm: "",
+  actual: "",
+  classValue: "",
+};
+
 export function buildTemplateContext(
   data: SummaryProtocol,
 ): Record<string, unknown> {
-  const rows = flattenWorkplaceFactors(data.places, factorCells);
+  const rows = flattenWorkplaceFactors(data.places, factorCells, EMPTY_FACTOR);
 
   return {
     ...flatten(data, { skipKeys: ["places", "measuringTools"] }),

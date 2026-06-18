@@ -110,17 +110,30 @@ export interface SummaryPlaceLike<F> {
  * `count`; subsequent factor rows in the same workplace carry
  * `firstFactor: false` and empty leading columns so vertical-merge
  * cells in the template render their continuation form.
+ *
+ * A workplace with NO factors (a new position synced before it has any
+ * measurements) still emits ONE row so the profession appears in the table
+ * with empty factor columns. Pass `emptyFactor` to supply the blank cell
+ * values for that row; without it such a workplace is skipped entirely (and
+ * would drop the place's section header if it were the first workplace).
  */
 export function flattenWorkplaceFactors<F>(
   places: SummaryPlaceLike<F>[],
   mapFactor: (f: F) => Record<string, unknown>,
+  emptyFactor?: F,
 ): Record<string, unknown>[] {
   const rows: Record<string, unknown>[] = [];
   for (const place of places) {
     let firstWorkplace = true;
     for (const wp of place.workplaces) {
+      const factors =
+        wp.factors.length > 0
+          ? wp.factors
+          : emptyFactor !== undefined
+            ? [emptyFactor]
+            : [];
       let firstFactor = true;
-      for (const factor of wp.factors) {
+      for (const factor of factors) {
         rows.push({
           showSection: firstWorkplace && firstFactor,
           firstFactor,

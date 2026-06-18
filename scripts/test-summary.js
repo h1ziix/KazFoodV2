@@ -157,12 +157,17 @@ function factorCells(factor) {
   return cells;
 }
 
+// Пустой фактор — для рабочего места без измерений (mirrors EMPTY_FACTOR в
+// src/lib/generateSummaryProtocolDocx.ts): должность всё равно показывается
+// строкой с пустыми колонками факторов.
+const EMPTY_FACTOR = { name: "", method: "", norm: "", actual: "", classValue: "" };
 const rows = [];
 for (const place of data.places) {
   let firstWorkplace = true;
   for (const wp of place.workplaces) {
     let firstFactor = true;
-    for (const factor of wp.factors) {
+    const factors = wp.factors.length > 0 ? wp.factors : [EMPTY_FACTOR];
+    for (const factor of factors) {
       rows.push({
         showSection: firstWorkplace && firstFactor,
         firstFactor,
